@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- Added one plugin for Paper, Purpur, Spigot and Folia, with region scheduling on Folia.
+- Added Forge builds for Minecraft 1.7.10, 1.8.9 and 1.12.2, including automatic timing for bundled mod sounds.
+- Jukebox Playlists now runs on dedicated servers. Players can join without installing Jukebox Playlists.
+- The Bukkit port preserves the full disc and queue position and follows the actual end of LazoDiscs recordings.
+
 ## 1.0.1 — 2026-10-18
 
 - Автоматическое определение длительности модовых пластинок в Minecraft 1.16.5–1.19 по звукам внутри мода.

@@ -9,7 +9,7 @@ repositories { mavenCentral() }
 dependencies { annotationProcessor 'org.spongepowered:mixin:0.8.5:processor' }
 mixin { add sourceSets.main, 'main.refmap.json'; config 'jukebox-playlists.mixins.json' }
 
-version = '1.0.1'
+version = '1.1.0'
 group = 'dev.eyecrasher.jukeboxplaylists'
 base { archivesName = 'jukebox-playlists-neoforge-1.20.1' }
 tasks.withType(JavaCompile).configureEach {

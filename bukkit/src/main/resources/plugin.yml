@@ -1,0 +1,9 @@
+name: JukeboxPlaylists
+version: '${version}'
+main: dev.eyecrasher.jukeboxplaylists.bukkit.JukeboxPlaylists
+description: Chest playlists for jukeboxes on dedicated servers.
+authors: [EyeCrasher]
+website: https://github.com/eyecrasher0/Jukebox-Playlists
+api-version: '1.13'
+folia-supported: true
+softdepend: [LazoDiscs]

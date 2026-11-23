@@ -1,0 +1,12 @@
+[
+  {
+    "modid": "jukebox_playlists",
+    "name": "Jukebox Playlists",
+    "description": "Chest playlists for jukeboxes on dedicated servers.",
+    "version": "${version}",
+    "mcversion": "1.8.9",
+    "url": "https://github.com/eyecrasher0/Jukebox-Playlists",
+    "authorList": ["EyeCrasher"],
+    "serverSideOnly": true
+  }
+]
