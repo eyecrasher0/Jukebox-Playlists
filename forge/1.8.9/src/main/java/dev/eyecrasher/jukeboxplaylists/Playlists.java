@@ -14,6 +14,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemRecord;
 import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
+import net.minecraft.tileentity.TileEntityLockable;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
@@ -55,6 +56,7 @@ final class Playlists {
             if (!world.isBlockLoaded(adjacent) || world.getBlockState(adjacent).getBlock() == block) return null;
         }
         TileEntity tile = world.getTileEntity(pos);
+        if (tile instanceof TileEntityLockable && ((TileEntityLockable) tile).isLocked()) return null;
         return tile instanceof IInventory ? (IInventory) tile : null;
     }
 
@@ -84,25 +86,28 @@ final class Playlists {
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {
-            if (current != null && current.stackSize != 1) return;
+            if (current != null && current.stackSize > chest.getInventoryStackLimit()) return;
             int size = chest.getSizeInventory();
             int cursor = box.getTileData().hasKey(CURSOR) ? box.getTileData().getInteger(CURSOR) : -1;
             if (cursor < -1 || cursor >= size) cursor = -1;
             for (int offset = 1; offset <= size; offset++) {
                 int slot = (cursor + offset) % size;
                 ItemStack next = chest.getStackInSlot(slot);
-                if (empty(next) || next.stackSize != 1 || !(next.getItem() instanceof ItemRecord)) continue;
+                if (empty(next) || !(next.getItem() instanceof ItemRecord)) continue;
                 box.getTileData().setInteger(CURSOR, slot);
                 chest.setInventorySlotContents(slot, current);
                 play(world, box, next);
                 chest.markDirty();
                 return;
             }
+            if (current != null) {
+                play(world, box, current);
+                return;
+            }
             if (cursor >= 0) {
                 box.getTileData().removeTag(CURSOR);
                 box.markDirty();
             }
-            if (current != null) play(world, box, current);
         }
 
         private void play(WorldServer world, TileEntityJukebox box, ItemStack record) {

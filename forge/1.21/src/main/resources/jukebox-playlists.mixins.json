@@ -4,6 +4,7 @@
   "package": "dev.eyecrasher.jukeboxplaylists.mixin",
   "compatibilityLevel": "JAVA_21",
   "server": [
+    "ContainerLockAccessor",
     "JukeboxMixin",
     "LazoPlaybackMixin",
     "JukeboxBlockMixin",

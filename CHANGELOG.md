@@ -6,6 +6,8 @@
 - Added Forge builds for Minecraft 1.7.10, 1.8.9 and 1.12.2, including automatic timing for bundled mod sounds.
 - Jukebox Playlists now runs on dedicated servers. Players can join without installing Jukebox Playlists.
 - The Bukkit port preserves the full disc and queue position and follows the actual end of LazoDiscs recordings.
+- Playlists respect chest locks. Bukkit playlists check the depositor's `lazodiscs.play` permission before starting a recording.
+- The Bukkit port recognizes playable items from the native jukebox song component. The older Forge ports replay a lone record without delaying the next loop.
 
 ## 1.0.1 — 2026-10-18
 

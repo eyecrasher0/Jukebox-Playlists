@@ -2,7 +2,7 @@
 
 Brings Minecraft 26.4 jukebox playlists to **dedicated Java Edition servers**.
 
-[Download](https://github.com/EyeCrasher07/Jukebox-Playlists/releases) · [Changelog](CHANGELOG.md)
+[Download](https://github.com/eyecrasher0/Jukebox-Playlists/releases) · [Changelog](CHANGELOG.md)
 
 | Server | Minecraft | Installation |
 |---|---|---|
@@ -14,6 +14,7 @@ Brings Minecraft 26.4 jukebox playlists to **dedicated Java Edition servers**.
 Install Jukebox Playlists on the server. Clients use the server's usual game and mod setup.
 Place a single chest directly above a jukebox and add music discs. Each completed track returns to the chest, and the jukebox takes the next disc in slot order. The queue loops automatically.
 Vanilla and modded discs need no duration configuration. LazoDiscs recordings use their actual playback completion on supported LazoDiscs and Plasmo Voice setups. Forge 1.20.2 with LazoDiscs 1.0.7 uses the Plasmo Voice fix from the [1.0.1 release](https://github.com/eyecrasher0/Jukebox-Playlists/releases/tag/v1.0.1).
+Use an unlocked chest for the playlist. On Bukkit, automatic playback of LazoDiscs recordings requires the player who put the recording in the chest to be online with `lazodiscs.play`. On Folia, that player must be in the jukebox's region when the recording starts.
 
 Run `./gradlew build` in `bukkit/` or in the relevant loader and version directory. Use JDK 8 for Forge 1.7.10, 1.8.9 and 1.12.2, and the toolchains specified in `build.gradle` for other builds.
 

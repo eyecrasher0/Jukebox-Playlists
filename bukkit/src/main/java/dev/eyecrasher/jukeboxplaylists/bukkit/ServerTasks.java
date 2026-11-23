@@ -4,7 +4,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.function.Consumer;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.Entity;
 import org.bukkit.plugin.Plugin;
 
 /** Schedules block work on the owning region on Folia, and the main thread elsewhere. */
@@ -16,6 +18,8 @@ final class ServerTasks {
     private final Method repeatRegion;
     private final Method executeGlobal;
     private final Method cancel;
+    private final Method ownsEntity = optional(Bukkit.class, "isOwnedByCurrentRegion", Entity.class);
+    private final Method ownsLocation = optional(Bukkit.class, "isOwnedByCurrentRegion", Location.class);
 
     ServerTasks(Plugin plugin) throws ReflectiveOperationException {
         this.plugin = plugin;
@@ -44,6 +48,14 @@ final class ServerTasks {
     void region(World world, int x, int z, Runnable action) {
         if (regions == null) Bukkit.getScheduler().runTask(plugin, action);
         else call(executeRegion, regions, plugin, world, x, z, action);
+    }
+
+    boolean owns(Entity entity) {
+        return ownsEntity == null || (Boolean) call(ownsEntity, null, entity);
+    }
+
+    boolean owns(Location location) {
+        return ownsLocation == null || (Boolean) call(ownsLocation, null, location);
     }
 
     Runnable repeat(World world, int x, int z, Runnable action) {

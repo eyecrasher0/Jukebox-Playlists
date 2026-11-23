@@ -1,5 +1,6 @@
 package dev.eyecrasher.jukeboxplaylists;
 
+import dev.eyecrasher.jukeboxplaylists.mixin.ContainerLockAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.ItemStack;
@@ -30,6 +31,10 @@ public final class Playlists {
             return;
         }
         BlockEntity containerEntity = level.getBlockEntity(position.above());
+        if (containerEntity instanceof ContainerLockAccessor
+                && !((ContainerLockAccessor) containerEntity).jukeboxPlaylists$getLock().unlocksWith(ItemStack.EMPTY)) {
+            return;
+        }
         if (!(containerEntity instanceof Container)) {
             return;
         }

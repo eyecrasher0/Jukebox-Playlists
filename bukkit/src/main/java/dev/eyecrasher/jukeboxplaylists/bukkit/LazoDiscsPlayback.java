@@ -10,6 +10,7 @@ import org.bukkit.plugin.Plugin;
 
 /** Optional bridge to the Bukkit and native Paper LazoDiscs playback managers. */
 final class LazoDiscsPlayback {
+    static final String PLAY_PERMISSION = "lazodiscs.play";
     private final Plugin plugin;
     private final Object manager;
     private final Method read;
@@ -68,9 +69,9 @@ final class LazoDiscsPlayback {
     }
 
     Runnable suppressStart(Block block) {
-        if (expect == null) return () -> {};
+        if (expect == null) return null;
         Object marker = ServerTasks.call(expect, sounds, block);
-        return marker == null ? () -> {} : () -> ServerTasks.call(clear, sounds, marker);
+        return marker == null ? null : () -> ServerTasks.call(clear, sounds, marker);
     }
 
     private Object position(Block block) { return ServerTasks.call(key, null, block); }

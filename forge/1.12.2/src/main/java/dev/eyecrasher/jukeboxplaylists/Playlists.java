@@ -14,8 +14,10 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemRecord;
 import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
+import net.minecraft.tileentity.TileEntityLockable;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.EnumFacing;
+import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.SoundEvent;
 import java.lang.reflect.Field;
 import net.minecraft.world.WorldServer;
@@ -56,6 +58,7 @@ final class Playlists {
             if (!world.isBlockLoaded(adjacent) || world.getBlockState(adjacent).getBlock() == block) return null;
         }
         TileEntity tile = world.getTileEntity(pos);
+        if (tile instanceof TileEntityLockable && ((TileEntityLockable) tile).isLocked()) return null;
         return tile instanceof IInventory ? (IInventory) tile : null;
     }
 
@@ -85,25 +88,28 @@ final class Playlists {
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {
-            if (current != null && current.getCount() != 1) return;
+            if (current != null && current.getCount() > chest.getInventoryStackLimit()) return;
             int size = chest.getSizeInventory();
             int cursor = box.getTileData().hasKey(CURSOR) ? box.getTileData().getInteger(CURSOR) : -1;
             if (cursor < -1 || cursor >= size) cursor = -1;
             for (int offset = 1; offset <= size; offset++) {
                 int slot = (cursor + offset) % size;
                 ItemStack next = chest.getStackInSlot(slot);
-                if (empty(next) || next.getCount() != 1 || !(next.getItem() instanceof ItemRecord)) continue;
+                if (empty(next) || !(next.getItem() instanceof ItemRecord)) continue;
                 box.getTileData().setInteger(CURSOR, slot);
                 chest.setInventorySlotContents(slot, current == null ? ItemStack.EMPTY : current);
                 play(world, box, next);
                 chest.markDirty();
                 return;
             }
+            if (current != null) {
+                play(world, box, current);
+                return;
+            }
             if (cursor >= 0) {
                 box.getTileData().removeTag(CURSOR);
                 box.markDirty();
             }
-            if (current != null) play(world, box, current);
         }
 
         private void play(WorldServer world, TileEntityJukebox box, ItemStack record) {
@@ -121,13 +127,13 @@ final class Playlists {
 
     private static boolean empty(ItemStack item) { return item == null || item.isEmpty(); }
 
-    private static final Field RECORD_SOUND = recordSound();
+    private static final Field RECORD_SOUND = soundField(ItemRecord.class, SoundEvent.class);
+    private static final Field SOUND_NAME = soundField(SoundEvent.class, ResourceLocation.class);
 
-    private static Field recordSound() {
-        // The getter is stripped on a dedicated server. The stored sound is
-        // still present because the ItemRecord constructor initializes it.
-        for (Field field : ItemRecord.class.getDeclaredFields()) {
-            if (field.getType() == SoundEvent.class) {
+    private static Field soundField(Class<?> owner, Class<?> type) {
+        // The accessors are stripped on a dedicated server, but the values are saved by the constructors.
+        for (Field field : owner.getDeclaredFields()) {
+            if (field.getType() == type) {
                 field.setAccessible(true);
                 return field;
             }
@@ -136,11 +142,11 @@ final class Playlists {
     }
 
     private static long length(ItemRecord record) {
-        if (RECORD_SOUND == null) return -1;
+        if (RECORD_SOUND == null || SOUND_NAME == null) return -1;
         try {
-            SoundEvent sound = (SoundEvent) RECORD_SOUND.get(record);
-            return LegacyDiscLengths.ticks(sound == null || sound.getRegistryName() == null
-                    ? null : sound.getRegistryName().toString(), record.getUnlocalizedName());
+            Object sound = RECORD_SOUND.get(record);
+            ResourceLocation name = sound == null ? null : (ResourceLocation) SOUND_NAME.get(sound);
+            return LegacyDiscLengths.ticks(name == null ? null : name.toString(), record.getUnlocalizedName());
         } catch (IllegalAccessException failure) {
             return -1;
         }

@@ -4,9 +4,13 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.Optional;
 import org.bukkit.Bukkit;
 import org.bukkit.Effect;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.BlockState;
@@ -14,7 +18,6 @@ import org.bukkit.block.Chest;
 import org.bukkit.block.Jukebox;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
 
 /** Uses the installed Bukkit API, with a full-stack bridge for 1.7.10 and 1.12.2. */
 final class JukeboxAccess {
@@ -22,11 +25,13 @@ final class JukeboxAccess {
     private final Method setRecord = ServerTasks.optional(Jukebox.class, "setRecord", ItemStack.class);
     private final Method inventory = ServerTasks.optional(Jukebox.class, "getInventory");
     private final Method startPlaying = ServerTasks.optional(Jukebox.class, "startPlaying");
-    private final Method hasSong = ServerTasks.optional(ItemMeta.class, "hasJukeboxPlayable");
-    private final Method getSongComponent = ServerTasks.optional(ItemMeta.class, "getJukeboxPlayable");
-    private final Method getSong = getSongComponent == null ? null
-            : ServerTasks.optional(getSongComponent.getReturnType(), "getSong");
+    private final Method songFromStack;
+    private final Method copyForSong;
+    private final Method worldHandle;
+    private final Method registryAccess;
     private final Method blockData = ServerTasks.optional(Block.class, "getBlockData");
+    private final Method liveState = ServerTasks.optional(Block.class, "getState", boolean.class);
+    private final Method locked = ServerTasks.optional(Chest.class, "isLocked");
     private final Class<?> chestData;
     private final Method chestType;
     private final Method snapshot;
@@ -38,6 +43,30 @@ final class JukeboxAccess {
     private final Method toNative;
 
     JukeboxAccess() throws ReflectiveOperationException {
+        String craft = Bukkit.getServer().getClass().getPackage().getName();
+        Class<?> songs = songType();
+        if (songs == null) {
+            songFromStack = copyForSong = worldHandle = registryAccess = null;
+        } else {
+            copyForSong = Class.forName(craft + ".inventory.CraftItemStack").getMethod("asNMSCopy", ItemStack.class);
+            Class<?> nativeStack = copyForSong.getReturnType();
+            // Native lookup accounts for item defaults, removed components and registry resolution.
+            songFromStack = Arrays.stream(songs.getMethods())
+                    .filter(method -> Modifier.isStatic(method.getModifiers()) && method.getReturnType() == Optional.class)
+                    .filter(method -> method.getParameterCount() >= 1 && method.getParameterCount() <= 2
+                            && method.getParameterTypes()[method.getParameterCount() - 1] == nativeStack)
+                    .findFirst().orElseThrow(() -> new NoSuchMethodException("JukeboxSong.fromStack"));
+            if (songFromStack.getParameterCount() == 1) {
+                worldHandle = registryAccess = null;
+            } else {
+                worldHandle = Class.forName(craft + ".CraftWorld").getMethod("getHandle");
+                Class<?> lookup = songFromStack.getParameterTypes()[0];
+                registryAccess = Arrays.stream(worldHandle.getReturnType().getMethods())
+                        .filter(method -> !Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0
+                                && lookup.isAssignableFrom(method.getReturnType()))
+                        .findFirst().orElseThrow(() -> new NoSuchMethodException("World.registryAccess"));
+            }
+        }
         if (blockData == null) {
             chestData = null;
             chestType = null;
@@ -51,7 +80,6 @@ final class JukeboxAccess {
             markDirty = null;
             return;
         }
-        String craft = Bukkit.getServer().getClass().getPackage().getName();
         Class<?> craftJukebox = Class.forName(craft + ".block.CraftJukebox");
         Class<?> nativeType;
         if (craft.endsWith(".v1_7_R4")) {
@@ -76,6 +104,18 @@ final class JukeboxAccess {
 
     boolean nativeTiming() { return startPlaying != null; }
 
+    private static Class<?> songType() {
+        try {
+            return Class.forName("net.minecraft.world.item.JukeboxSong");
+        } catch (ClassNotFoundException legacy) {
+            return null;
+        }
+    }
+
+    BlockState state(Block block) {
+        return liveState == null ? block.getState() : (BlockState) ServerTasks.call(liveState, block, false);
+    }
+
     ItemStack record(Jukebox box) {
         ItemStack item;
         if (inventory != null) item = ((Inventory) ServerTasks.call(inventory, box)).getItem(0);
@@ -95,8 +135,12 @@ final class JukeboxAccess {
     boolean insert(Jukebox box, ItemStack disc, boolean silent) {
         if (inventory != null) {
             Inventory live = (Inventory) ServerTasks.call(inventory, box);
-            live.setItem(0, disc);
-            return disc.equals(live.getItem(0));
+            ItemStack old = live.getItem(0);
+            ItemStack previous = empty(old) ? null : old.clone();
+            live.setItem(0, disc.clone());
+            if (disc.equals(live.getItem(0))) return true;
+            live.setItem(0, previous);
+            return false;
         }
         if (liveRecordPlayer != null) {
             // 1.7's Bukkit method sets the native flag, plays the record, and
@@ -107,9 +151,13 @@ final class JukeboxAccess {
             ServerTasks.call(markDirty, player);
             return true;
         }
-        if (setRecord != null) ServerTasks.call(setRecord, box, disc);
-        else ServerTasks.call(nativeSet, recordPlayer(box), ServerTasks.call(toNative, null, disc));
-        return silent ? updateSilently(box) : box.update(false, true);
+        BlockState state = box.getBlock().getState();
+        if (!(state instanceof Jukebox)) return false;
+        Jukebox snapshot = (Jukebox) state;
+        if (setRecord != null) ServerTasks.call(setRecord, snapshot, disc);
+        else ServerTasks.call(nativeSet, recordPlayer(snapshot), ServerTasks.call(toNative, null, disc));
+        if (!disc.equals(record(snapshot))) return false;
+        return silent ? updateSilently(snapshot) : snapshot.update(false, true);
     }
 
     private Object recordPlayer(Jukebox box) {
@@ -137,13 +185,13 @@ final class JukeboxAccess {
         }
     }
 
-    boolean isDisc(ItemStack item) {
+    boolean isDisc(ItemStack item, World world) {
         if (empty(item)) return false;
-        if (item.getType().isRecord()) return true;
-        if (hasSong == null || !item.hasItemMeta()) return false;
-        ItemMeta meta = item.getItemMeta();
-        if (meta == null || !(Boolean) ServerTasks.call(hasSong, meta)) return false;
-        return ServerTasks.call(getSong, ServerTasks.call(getSongComponent, meta)) != null;
+        if (songFromStack == null) return item.getType().isRecord();
+        Object stack = ServerTasks.call(copyForSong, null, item);
+        if (registryAccess == null) return ((Optional<?>) ServerTasks.call(songFromStack, null, stack)).isPresent();
+        Object registries = ServerTasks.call(registryAccess, ServerTasks.call(worldHandle, world));
+        return ((Optional<?>) ServerTasks.call(songFromStack, null, registries, stack)).isPresent();
     }
 
     Inventory chest(Block block) {
@@ -159,8 +207,9 @@ final class JukeboxAccess {
                 if (adjacent.getType() == block.getType()) return null;
             }
         }
-        BlockState state = block.getState();
-        return state instanceof Chest ? ((Chest) state).getBlockInventory() : null;
+        BlockState state = state(block);
+        if (!(state instanceof Chest) || (locked != null && (Boolean) ServerTasks.call(locked, state))) return null;
+        return ((Chest) state).getBlockInventory();
     }
 
     static boolean isChest(Material material) {

@@ -36,8 +36,8 @@ public final class LegacyDiscLengths {
     private static Map<String, Long> vanilla() {
         Map<String, Long> lengths = new HashMap<>();
         String[] discs = {"13", "cat", "blocks", "chirp", "far", "mall", "mellohi",
-                          "stal", "strad", "ward", "11", "wait", "pigstep", "otherside", "5"};
-        int[] seconds = {178, 185, 345, 185, 174, 197, 96, 150, 188, 251, 71, 238, 149, 195, 178};
+                          "stal", "strad", "ward", "11", "wait"};
+        int[] seconds = {178, 185, 345, 185, 174, 197, 96, 150, 188, 251, 71, 238};
         for (int i = 0; i < discs.length; i++) {
             lengths.put("minecraft:records." + discs[i], seconds[i] * 20L);
             lengths.put("minecraft:record." + discs[i], seconds[i] * 20L);

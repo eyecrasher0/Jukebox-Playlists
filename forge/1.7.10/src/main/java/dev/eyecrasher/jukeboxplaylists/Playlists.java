@@ -83,13 +83,13 @@ final class Playlists {
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {
-            if (current != null && current.stackSize != 1) return;
+            if (current != null && current.stackSize > chest.getInventoryStackLimit()) return;
             int size = chest.getSizeInventory();
             if (cursor < -1 || cursor >= size) cursor = -1;
             for (int offset = 1; offset <= size; offset++) {
                 int slot = (cursor + offset) % size;
                 ItemStack next = chest.getStackInSlot(slot);
-                if (empty(next) || next.stackSize != 1 || !(next.getItem() instanceof ItemRecord)) continue;
+                if (empty(next) || !(next.getItem() instanceof ItemRecord)) continue;
                 cursor = slot;
                 PlaylistPositions.store(world, box, slot);
                 chest.setInventorySlotContents(slot, current);
@@ -97,11 +97,14 @@ final class Playlists {
                 chest.markDirty();
                 return;
             }
+            if (current != null) {
+                play(world, box, current);
+                return;
+            }
             if (cursor >= 0) {
                 cursor = -1;
                 PlaylistPositions.store(world, box, -1);
             }
-            if (current != null) play(world, box, current);
         }
 
         private void play(WorldServer world, TileEntityJukebox box, ItemStack record) {

@@ -14,12 +14,20 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.Chest;
 import org.bukkit.block.Jukebox;
+import org.bukkit.entity.HumanEntity;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPhysicsEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.inventory.InventoryAction;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
@@ -98,6 +106,14 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     public void placed(BlockPlaceEvent event) { scheduleDiscovery(event.getBlockPlaced()); }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void broken(BlockBreakEvent event) {
+        Block chest = event.getBlock();
+        if (lazo == null || !JukeboxAccess.isChest(chest.getType())) return;
+        Playback playback = playback(chest.getRelative(BlockFace.DOWN));
+        if (playback != null) playback.detach();
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void physics(BlockPhysicsEvent event) {
         Block block = event.getBlock();
         if (block.getType() == Material.JUKEBOX && !tracked(block)) scheduleDiscovery(block);
@@ -105,9 +121,93 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void opened(InventoryOpenEvent event) {
-        if (event.getInventory().getHolder() instanceof org.bukkit.block.Chest) {
-            scheduleDiscovery(((org.bukkit.block.Chest) event.getInventory().getHolder()).getBlock());
+        if (event.getInventory().getHolder() instanceof Chest) {
+            scheduleDiscovery(((Chest) event.getInventory().getHolder()).getBlock());
         }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void clicked(InventoryClickEvent event) {
+        if (lazo == null || event.getAction() == InventoryAction.NOTHING) return;
+        Inventory chest = event.getView().getTopInventory();
+        Playback playback = playbackFor(chest);
+        if (playback == null) return;
+        RecordingApprovals recordings = playback.recordings;
+        recordings.update(chest);
+        HumanEntity player = event.getWhoClicked();
+        int slot = event.getRawSlot();
+        boolean chestSlot = slot >= 0 && slot < chest.getSize();
+        if (chestSlot) recordings.forget(slot);
+        if (event.getAction() == InventoryAction.COLLECT_TO_CURSOR) recordings.forget(event.getCursor());
+        if (!(player instanceof Player) || !player.hasPermission(LazoDiscsPlayback.PLAY_PERMISSION)) return;
+        ItemStack incoming;
+        switch (event.getAction()) {
+            case PLACE_ALL:
+            case PLACE_ONE:
+            case PLACE_SOME:
+            case SWAP_WITH_CURSOR:
+                incoming = event.getCursor();
+                break;
+            case HOTBAR_SWAP:
+            case HOTBAR_MOVE_AND_READD:
+                int hotbar = event.getHotbarButton();
+                if (hotbar >= 0) incoming = player.getInventory().getItem(hotbar);
+                else if ("SWAP_OFFHAND".equals(event.getClick().name())) incoming = player.getInventory().getItemInOffHand();
+                else return;
+                break;
+            case MOVE_TO_OTHER_INVENTORY:
+                incoming = event.getCurrentItem();
+                if (!chestSlot && slot >= chest.getSize() && lazo.custom(incoming)) {
+                    for (int index = 0; index < chest.getSize(); index++) {
+                        recordings.expect(chest, index, incoming, player.getUniqueId());
+                    }
+                }
+                return;
+            default:
+                return;
+        }
+        if (chestSlot && lazo.custom(incoming)) recordings.expect(chest, slot, incoming, player.getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void dragged(InventoryDragEvent event) {
+        if (lazo == null) return;
+        Inventory chest = event.getView().getTopInventory();
+        Playback playback = playbackFor(chest);
+        if (playback == null) return;
+        playback.recordings.update(chest);
+        HumanEntity player = event.getWhoClicked();
+        boolean permitted = player instanceof Player && player.hasPermission(LazoDiscsPlayback.PLAY_PERMISSION);
+        for (Map.Entry<Integer, ItemStack> change : event.getNewItems().entrySet()) {
+            int slot = change.getKey();
+            if (slot < 0 || slot >= chest.getSize()) continue;
+            playback.recordings.forget(slot);
+            if (permitted && lazo.custom(change.getValue())) {
+                playback.recordings.expect(chest, slot, change.getValue(), player.getUniqueId());
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void moved(InventoryMoveItemEvent event) {
+        if (lazo == null || !lazo.custom(event.getItem())) return;
+        for (Inventory endpoint : new Inventory[] {event.getSource(), event.getDestination()}) {
+            if (!(endpoint.getHolder() instanceof Chest)) continue;
+            Block chest = ((Chest) endpoint.getHolder()).getBlock();
+            if (tasks.owns(chest.getLocation())) {
+                Playback playback = playback(chest.getRelative(BlockFace.DOWN));
+                if (playback != null) playback.recordings.forget(event.getItem());
+            }
+        }
+    }
+
+    private Playback playbackFor(Inventory chest) {
+        if (!(chest.getHolder() instanceof Chest)) return null;
+        Block top = ((Chest) chest.getHolder()).getBlock();
+        if (!tasks.owns(top.getLocation())) return null;
+        Block box = top.getRelative(BlockFace.DOWN);
+        if (box.getType() != Material.JUKEBOX) return null;
+        return track(box.getChunk(), box);
     }
 
     private void scheduleDiscovery(Block placed) {
@@ -130,16 +230,20 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     }
 
     private boolean tracked(Block block) {
-        Map<Long, TrackedChunk> chunks = worlds.get(block.getWorld().getUID());
-        if (chunks == null) return false;
-        TrackedChunk chunk = chunks.get(chunkKey(block.getX() >> 4, block.getZ() >> 4));
-        return chunk != null && chunk.boxes.containsKey(block);
+        return playback(block) != null;
     }
 
-    private void track(Chunk chunk, Block block) {
+    private Playback playback(Block block) {
+        Map<Long, TrackedChunk> chunks = worlds.get(block.getWorld().getUID());
+        if (chunks == null) return null;
+        TrackedChunk chunk = chunks.get(chunkKey(block.getX() >> 4, block.getZ() >> 4));
+        return chunk == null ? null : chunk.boxes.get(block);
+    }
+
+    private Playback track(Chunk chunk, Block block) {
         Map<Long, TrackedChunk> chunks = worlds.computeIfAbsent(chunk.getWorld().getUID(), ignored -> new ConcurrentHashMap<>());
         TrackedChunk tracked = chunks.computeIfAbsent(chunkKey(chunk), ignored -> new TrackedChunk(chunk, chunks));
-        tracked.boxes.computeIfAbsent(block, ignored -> new Playback(positions.load(chunk, block)));
+        return tracked.boxes.computeIfAbsent(block, ignored -> new Playback(positions.load(chunk, block)));
     }
 
     private void savePositions() {
@@ -190,37 +294,34 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     }
 
     private final class Playback {
+        private final RecordingApprovals recordings = new RecordingApprovals();
         private int cursor;
         private ItemStack previous;
         private boolean attached;
-        private boolean customStarted;
+        private UUID recordingPlayer;
         private long elapsed;
 
         Playback(int cursor) { this.cursor = cursor; }
 
         void tick(Chunk chunk, Block block) {
-            Inventory chest = block.getY() + 1 < block.getWorld().getMaxHeight()
-                    ? access.chest(block.getRelative(BlockFace.UP)) : null;
-            if (chest == null) {
-                attached = false;
+            if (block.getY() + 1 >= block.getWorld().getMaxHeight()) return;
+            Block chest = block.getRelative(BlockFace.UP);
+            boolean reattached = !attached;
+            if (!JukeboxAccess.isChest(chest.getType()) || (reattached && access.chest(chest) == null)) {
+                detach();
                 return;
             }
-            BlockState snapshot = block.getState();
+            BlockState snapshot = access.state(block);
             if (!(snapshot instanceof Jukebox)) return;
             Jukebox box = (Jukebox) snapshot;
             ItemStack current = access.record(box);
             boolean changed = !java.util.Objects.equals(previous, current);
             if (changed || !attached) reset(current);
-            boolean reattached = !attached;
             attached = true;
             if (current == null) {
                 advance(chunk, box, chest, null);
             } else if (lazo != null && lazo.custom(current)) {
                 if (!lazo.ready()) return;
-                if (!customStarted) {
-                    if (!lazo.playing(block) && !lazo.ended(block)) lazo.changed(block, false);
-                    customStarted = true;
-                }
                 if (lazo.playing(block)) elapsed = 0;
                 else if (++elapsed >= 20) advance(chunk, box, chest, current);
             } else if (access.nativeTiming()) {
@@ -237,34 +338,56 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
 
         private void reset(ItemStack record) {
             previous = record == null ? null : record.clone();
-            customStarted = false;
+            recordingPlayer = null;
             elapsed = 0;
         }
 
-        private void advance(Chunk chunk, Jukebox box, Inventory chest, ItemStack current) {
-            if (current != null && current.getAmount() != 1) return;
+        private void detach() {
+            attached = false;
+            recordings.clear();
+            recordingPlayer = null;
+        }
+
+        private boolean canPlayRecording(UUID playerId) {
+            Player player = playerId == null ? null : Bukkit.getPlayer(playerId);
+            return player != null && tasks.owns(player) && player.isOnline()
+                    && player.hasPermission(LazoDiscsPlayback.PLAY_PERMISSION);
+        }
+
+        private void advance(Chunk chunk, Jukebox box, Block chestBlock, ItemStack current) {
+            Inventory chest = access.chest(chestBlock);
+            if (chest == null) {
+                detach();
+                return;
+            }
+            if (current != null && current.getAmount() > chest.getMaxStackSize()) return;
+            if (lazo != null) recordings.update(chest);
             int size = chest.getSize();
             int start = cursor < -1 || cursor >= size ? -1 : cursor;
             for (int offset = 1; offset <= size; offset++) {
                 int slot = (start + offset) % size;
                 ItemStack candidate = chest.getItem(slot);
-                if (!access.isDisc(candidate) || candidate.getAmount() != 1) continue;
+                if (!access.isDisc(candidate, box.getWorld())) continue;
                 boolean custom = lazo != null && lazo.custom(candidate);
+                UUID approver = custom ? recordings.player(slot) : null;
+                if (custom && !canPlayRecording(approver)) continue;
                 ItemStack returned = current == null ? null : current.clone();
-                if (!insert(box, candidate, custom)) return;
+                if (!insert(box, candidate, custom)) continue;
                 chest.setItem(slot, returned);
+                if (lazo != null) recordings.store(slot, returned, recordingPlayer);
                 cursor = slot;
                 positions.store(chunk, box.getBlock(), slot);
-                afterInsert(box, candidate, custom);
+                afterInsert(box, candidate, custom, approver);
                 return;
             }
-            if (cursor != -1) {
+            if (current == null && cursor != -1) {
                 cursor = -1;
                 positions.store(chunk, box.getBlock(), -1);
             }
-            if (access.isDisc(current)) {
+            if (access.isDisc(current, box.getWorld())) {
                 boolean custom = lazo != null && lazo.custom(current);
-                if (insert(box, current, custom)) afterInsert(box, current, custom);
+                if (custom && !canPlayRecording(recordingPlayer)) return;
+                if (insert(box, current, custom)) afterInsert(box, current, custom, recordingPlayer);
             }
         }
 
@@ -279,11 +402,11 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
             }
         }
 
-        private void afterInsert(Jukebox box, ItemStack record, boolean custom) {
+        private void afterInsert(Jukebox box, ItemStack record, boolean custom, UUID approver) {
             reset(record);
+            recordingPlayer = approver;
             if (lazo != null) {
                 lazo.changed(box.getBlock(), custom);
-                customStarted = custom;
             }
             if (!custom && access.nativeTiming() && !box.isPlaying()) access.start(box);
         }
