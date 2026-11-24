@@ -42,7 +42,9 @@ final class Playlists {
                     active.remove(box);
                     continue;
                 }
-                active.computeIfAbsent(box, ignored -> new Playback(box)).tick(world, box, chest);
+                boolean locked = chest instanceof TileEntityLockable && ((TileEntityLockable) chest).isLocked();
+                if (locked && !active.containsKey(box)) continue;
+                active.computeIfAbsent(box, ignored -> new Playback(box)).tick(world, box, chest, locked);
             }
         } finally {
             ticking.clear();
@@ -58,7 +60,6 @@ final class Playlists {
             if (!world.isBlockLoaded(adjacent) || world.getBlockState(adjacent).getBlock() == block) return null;
         }
         TileEntity tile = world.getTileEntity(pos);
-        if (tile instanceof TileEntityLockable && ((TileEntityLockable) tile).isLocked()) return null;
         return tile instanceof IInventory ? (IInventory) tile : null;
     }
 
@@ -71,7 +72,7 @@ final class Playlists {
             resume = box.getTileData().hasKey(CURSOR);
         }
 
-        void tick(WorldServer world, TileEntityJukebox box, IInventory chest) {
+        void tick(WorldServer world, TileEntityJukebox box, IInventory chest, boolean locked) {
             ItemStack current = box.getRecord();
             if (!empty(current) && current != previous) {
                 previous = current;
@@ -80,25 +81,28 @@ final class Playlists {
             }
             resume = false;
             if (empty(current)) {
-                advance(world, box, chest, null);
+                if (!locked) advance(world, box, chest, null);
             } else if (current.getItem() instanceof ItemRecord) {
                 long length = length((ItemRecord) current.getItem());
-                if (++elapsed >= length + 20 && length > 0) advance(world, box, chest, current);
+                if (++elapsed >= length + 20 && length > 0 && !locked) advance(world, box, chest, current);
             }
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {
-            if (current != null && current.getCount() > chest.getInventoryStackLimit()) return;
+            boolean canReturn = current == null
+                    || current.getCount() <= Math.min(current.getMaxStackSize(), chest.getInventoryStackLimit());
             int size = chest.getSizeInventory();
             int cursor = box.getTileData().hasKey(CURSOR) ? box.getTileData().getInteger(CURSOR) : -1;
             if (cursor < -1 || cursor >= size) cursor = -1;
-            for (int offset = 1; offset <= size; offset++) {
+            for (int offset = 1; canReturn && offset <= size; offset++) {
                 int slot = (cursor + offset) % size;
                 ItemStack next = chest.getStackInSlot(slot);
-                if (empty(next) || !(next.getItem() instanceof ItemRecord)) continue;
-                box.getTileData().setInteger(CURSOR, slot);
+                if (empty(next) || !(next.getItem() instanceof ItemRecord)
+                        || next.getCount() > next.getMaxStackSize()) continue;
+                play(world, box, next.copy());
                 chest.setInventorySlotContents(slot, current == null ? ItemStack.EMPTY : current);
-                play(world, box, next);
+                box.getTileData().setInteger(CURSOR, slot);
+                box.markDirty();
                 chest.markDirty();
                 return;
             }

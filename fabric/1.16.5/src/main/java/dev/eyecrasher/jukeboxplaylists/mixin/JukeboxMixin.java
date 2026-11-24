@@ -24,7 +24,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(JukeboxBlockEntity.class)
 public abstract class JukeboxMixin implements PlaylistJukebox, net.minecraft.world.level.block.entity.TickableBlockEntity {
     @Unique private int playlist$cursor = -1;
-    @Unique private int playlist$customEndDelay = -1;
+    @Unique private int playlist$advanceDelay = -1;
     @Unique private ItemStack playlist$finishedItem = ItemStack.EMPTY;
     @Unique private long playlist$elapsed;
 
@@ -36,7 +36,7 @@ public abstract class JukeboxMixin implements PlaylistJukebox, net.minecraft.wor
 
     @Override public void playlist$play(ItemStack stack) {
         JukeboxBlockEntity jukebox = (JukeboxBlockEntity) (Object) this;
-        playlist$customEndDelay = -1;
+        playlist$advanceDelay = -1;
         playlist$finishedItem = ItemStack.EMPTY;
         if (LazoDiscsCompat.play(this, stack)) return;
         jukebox.setRecord(stack);
@@ -54,31 +54,38 @@ public abstract class JukeboxMixin implements PlaylistJukebox, net.minecraft.wor
         JukeboxBlockEntity jukebox = (JukeboxBlockEntity) (Object) this;
         Level level = jukebox.getLevel();
         if (level == null || Platform.isClient(level) || jukebox.isRemoved()) return;
-        if (LazoDiscsCompat.isCustom(playlist$current())) {
+        ItemStack current = playlist$current();
+        if (playlist$advanceDelay >= 0 && current != playlist$finishedItem) {
+            playlist$advanceDelay = -1;
+            playlist$finishedItem = ItemStack.EMPTY;
+        }
+        boolean custom = LazoDiscsCompat.isCustom(current);
+        if (custom) {
             // Keep vanilla's one-second gap, including for unavailable URLs;
             // never start a tight retry loop on the audio loader thread.
-            if (playlist$current() != playlist$finishedItem) playlist$customEndDelay = -1;
-            if (playlist$customEndDelay > 0 && --playlist$customEndDelay == 0) {
-                playlist$customEndDelay = -1;
-                Playlists.advance(this, true);
-            }
-        } else {
-            if (!playlist$current().isEmpty() && playlist$elapsed >= 0) {
-            long length = dev.eyecrasher.jukeboxplaylists.LegacyDiscLengths.ticks(playlist$current());
+            if (playlist$advanceDelay > 0) playlist$advanceDelay--;
+        } else if (!current.isEmpty() && playlist$advanceDelay < 0 && playlist$elapsed >= 0) {
+            long length = dev.eyecrasher.jukeboxplaylists.LegacyDiscLengths.ticks(current);
             // Count playback while the first background resource scan runs.
             if (playlist$elapsed++ >= length + 20 && length > 0) {
-                playlist$elapsed = -1;
-                Playlists.advance(this, true);
+                playlist$advanceDelay = 0;
+                playlist$finishedItem = current;
             }
             if (playlist$elapsed > 0 && playlist$elapsed % 200 == 0) jukebox.setChanged();
         }
+        if (playlist$current().isEmpty()) {
+            Playlists.advance(this, false);
+        } else if (playlist$advanceDelay == 0 && playlist$current() == playlist$finishedItem
+                && Playlists.advance(this, true) && playlist$advanceDelay == 0) {
+            playlist$advanceDelay = -1;
+            playlist$finishedItem = ItemStack.EMPTY;
+            if (!custom) playlist$elapsed = -1;
         }
-        if (playlist$current().isEmpty()) Playlists.advance(this, false);
     }
 
     @Override public void playlist$customFinished() {
         playlist$finishedItem = playlist$current();
-        playlist$customEndDelay = 20;
+        playlist$advanceDelay = 20;
     }
 
     @Inject(method = "setRecord", at = @At("TAIL"))

@@ -194,7 +194,7 @@ final class JukeboxAccess {
         return ((Optional<?>) ServerTasks.call(songFromStack, null, registries, stack)).isPresent();
     }
 
-    Inventory chest(Block block) {
+    Chest singleChest(Block block) {
         if (!isChest(block.getType())) return null;
         if (blockData != null) {
             Object data = ServerTasks.call(blockData, block);
@@ -208,9 +208,10 @@ final class JukeboxAccess {
             }
         }
         BlockState state = state(block);
-        if (!(state instanceof Chest) || (locked != null && (Boolean) ServerTasks.call(locked, state))) return null;
-        return ((Chest) state).getBlockInventory();
+        return state instanceof Chest ? (Chest) state : null;
     }
+
+    boolean isLocked(Chest chest) { return locked != null && (Boolean) ServerTasks.call(locked, chest); }
 
     static boolean isChest(Material material) {
         String name = material.name();

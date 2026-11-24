@@ -83,17 +83,19 @@ final class Playlists {
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {
-            if (current != null && current.stackSize > chest.getInventoryStackLimit()) return;
+            boolean canReturn = current == null
+                    || current.stackSize <= Math.min(current.getMaxStackSize(), chest.getInventoryStackLimit());
             int size = chest.getSizeInventory();
             if (cursor < -1 || cursor >= size) cursor = -1;
-            for (int offset = 1; offset <= size; offset++) {
+            for (int offset = 1; canReturn && offset <= size; offset++) {
                 int slot = (cursor + offset) % size;
                 ItemStack next = chest.getStackInSlot(slot);
-                if (empty(next) || !(next.getItem() instanceof ItemRecord)) continue;
+                if (empty(next) || !(next.getItem() instanceof ItemRecord)
+                        || next.stackSize > next.getMaxStackSize()) continue;
+                play(world, box, next.copy());
+                chest.setInventorySlotContents(slot, current);
                 cursor = slot;
                 PlaylistPositions.store(world, box, slot);
-                chest.setInventorySlotContents(slot, current);
-                play(world, box, next);
                 chest.markDirty();
                 return;
             }
@@ -121,11 +123,13 @@ final class Playlists {
     private static boolean empty(ItemStack item) { return item == null || item.stackSize <= 0; }
 
     private static long length(ItemRecord record) {
-        ResourceLocation sound = record.getRecordResource("records." + record.recordName);
-        return LegacyDiscLengths.ticks(sound == null ? null : sound.toString(), record.getUnlocalizedName());
+        String defaultSound = "records." + record.recordName;
+        ResourceLocation sound = record.getRecordResource(defaultSound);
+        if (sound == null) sound = new ResourceLocation(defaultSound);
+        return LegacyDiscLengths.ticks(sound.toString(), record.getUnlocalizedName());
     }
 
     private static void sound(WorldServer world, TileEntityJukebox box, ItemStack record) {
-        world.playAuxSFX(1010, box.xCoord, box.yCoord, box.zCoord, Item.getIdFromItem(record.getItem()));
+        world.playAuxSFX(1005, box.xCoord, box.yCoord, box.zCoord, Item.getIdFromItem(record.getItem()));
     }
 }

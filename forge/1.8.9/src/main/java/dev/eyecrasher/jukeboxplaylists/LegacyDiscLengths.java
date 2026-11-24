@@ -22,7 +22,6 @@ public final class LegacyDiscLengths {
     private LegacyDiscLengths() {}
 
     public static long ticks(String sound, String item) {
-        if (sound == null) return -1;
         Long vanilla = VANILLA.get(sound);
         if (vanilla != null) return vanilla;
         return DISCOVERED.computeIfAbsent(sound, id -> CompletableFuture.supplyAsync(() -> {
@@ -40,7 +39,6 @@ public final class LegacyDiscLengths {
         int[] seconds = {178, 185, 345, 185, 174, 197, 96, 150, 188, 251, 71, 238};
         for (int i = 0; i < discs.length; i++) {
             lengths.put("minecraft:records." + discs[i], seconds[i] * 20L);
-            lengths.put("minecraft:record." + discs[i], seconds[i] * 20L);
         }
         return lengths;
     }

@@ -18,7 +18,6 @@ final class LazoDiscsPlayback {
     private final Method sync;
     private final Method retire;
     private final Field active;
-    private final Field completed;
     private final Object voice;
     private final Method ready;
     private final Object sounds;
@@ -37,8 +36,7 @@ final class LazoDiscsPlayback {
         key = method(position, "of", Block.class);
         sync = method(type, "sync", Block.class, boolean.class);
         active = field(type, "active");
-        completed = optionalField(type, "completed");
-        retire = completed == null ? null : optionalMethod(type, "retireCompleted", position);
+        retire = optionalMethod(type, "retireCompleted", position);
         voice = field(type, "voice").get(manager);
         ready = voice.getClass().getMethod("isReady");
         Field soundField = optionalField(type, "sounds");
@@ -56,15 +54,9 @@ final class LazoDiscsPlayback {
 
     boolean playing(Block block) { return entries(active).containsKey(position(block)); }
 
-    boolean ended(Block block) { return completed != null && entries(completed).containsKey(position(block)); }
-
     void changed(Block block, boolean replay) {
         if (!plugin.isEnabled()) return;
-        if (replay && completed != null) {
-            Object position = position(block);
-            if (retire != null) ServerTasks.call(retire, manager, position);
-            else entries(completed).remove(position);
-        }
+        if (replay && retire != null) ServerTasks.call(retire, manager, position(block));
         ServerTasks.call(sync, manager, block, true);
     }
 

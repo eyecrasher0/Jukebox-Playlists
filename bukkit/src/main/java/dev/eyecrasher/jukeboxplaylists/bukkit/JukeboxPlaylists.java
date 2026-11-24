@@ -139,7 +139,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         boolean chestSlot = slot >= 0 && slot < chest.getSize();
         if (chestSlot) recordings.forget(slot);
         if (event.getAction() == InventoryAction.COLLECT_TO_CURSOR) recordings.forget(event.getCursor());
-        if (!(player instanceof Player) || !player.hasPermission(LazoDiscsPlayback.PLAY_PERMISSION)) return;
+        if (!(player instanceof Player)) return;
         ItemStack incoming;
         switch (event.getAction()) {
             case PLACE_ALL:
@@ -177,12 +177,11 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         if (playback == null) return;
         playback.recordings.update(chest);
         HumanEntity player = event.getWhoClicked();
-        boolean permitted = player instanceof Player && player.hasPermission(LazoDiscsPlayback.PLAY_PERMISSION);
         for (Map.Entry<Integer, ItemStack> change : event.getNewItems().entrySet()) {
             int slot = change.getKey();
             if (slot < 0 || slot >= chest.getSize()) continue;
             playback.recordings.forget(slot);
-            if (permitted && lazo.custom(change.getValue())) {
+            if (player instanceof Player && lazo.custom(change.getValue())) {
                 playback.recordings.expect(chest, slot, change.getValue(), player.getUniqueId());
             }
         }
@@ -299,6 +298,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         private ItemStack previous;
         private boolean attached;
         private UUID recordingPlayer;
+        private boolean recordingStarted;
         private long elapsed;
 
         Playback(int cursor) { this.cursor = cursor; }
@@ -307,9 +307,17 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
             if (block.getY() + 1 >= block.getWorld().getMaxHeight()) return;
             Block chest = block.getRelative(BlockFace.UP);
             boolean reattached = !attached;
-            if (!JukeboxAccess.isChest(chest.getType()) || (reattached && access.chest(chest) == null)) {
+            if (!JukeboxAccess.isChest(chest.getType())) {
                 detach();
                 return;
+            }
+            if (reattached) {
+                Chest chestState = access.singleChest(chest);
+                if (chestState == null) {
+                    detach();
+                    return;
+                }
+                if (access.isLocked(chestState)) return;
             }
             BlockState snapshot = access.state(block);
             if (!(snapshot instanceof Jukebox)) return;
@@ -322,8 +330,12 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                 advance(chunk, box, chest, null);
             } else if (lazo != null && lazo.custom(current)) {
                 if (!lazo.ready()) return;
-                if (lazo.playing(block)) elapsed = 0;
-                else if (++elapsed >= 20) advance(chunk, box, chest, current);
+                if (lazo.playing(block)) {
+                    recordingStarted = true;
+                    elapsed = 0;
+                } else if (++elapsed >= 20) {
+                    advance(chunk, box, chest, current);
+                }
             } else if (access.nativeTiming()) {
                 if (!box.isPlaying()) {
                     if (reattached && cursor >= 0) access.start(box);
@@ -339,6 +351,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         private void reset(ItemStack record) {
             previous = record == null ? null : record.clone();
             recordingPlayer = null;
+            recordingStarted = false;
             elapsed = 0;
         }
 
@@ -355,19 +368,22 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         }
 
         private void advance(Chunk chunk, Jukebox box, Block chestBlock, ItemStack current) {
-            Inventory chest = access.chest(chestBlock);
-            if (chest == null) {
+            Chest chestState = access.singleChest(chestBlock);
+            if (chestState == null) {
                 detach();
                 return;
             }
-            if (current != null && current.getAmount() > chest.getMaxStackSize()) return;
+            if (access.isLocked(chestState)) return;
+            Inventory chest = chestState.getBlockInventory();
+            boolean canReturn = current == null
+                    || current.getAmount() <= Math.min(current.getMaxStackSize(), chest.getMaxStackSize());
             if (lazo != null) recordings.update(chest);
             int size = chest.getSize();
             int start = cursor < -1 || cursor >= size ? -1 : cursor;
-            for (int offset = 1; offset <= size; offset++) {
+            for (int offset = 1; canReturn && offset <= size; offset++) {
                 int slot = (start + offset) % size;
                 ItemStack candidate = chest.getItem(slot);
-                if (!access.isDisc(candidate, box.getWorld())) continue;
+                if (!access.isDisc(candidate, box.getWorld()) || candidate.getAmount() > candidate.getMaxStackSize()) continue;
                 boolean custom = lazo != null && lazo.custom(candidate);
                 UUID approver = custom ? recordings.player(slot) : null;
                 if (custom && !canPlayRecording(approver)) continue;
@@ -386,7 +402,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
             }
             if (access.isDisc(current, box.getWorld())) {
                 boolean custom = lazo != null && lazo.custom(current);
-                if (custom && !canPlayRecording(recordingPlayer)) return;
+                if (custom && (!recordingStarted || !canPlayRecording(recordingPlayer))) return;
                 if (insert(box, current, custom)) afterInsert(box, current, custom, recordingPlayer);
             }
         }
@@ -407,6 +423,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
             recordingPlayer = approver;
             if (lazo != null) {
                 lazo.changed(box.getBlock(), custom);
+                if (custom) recordingStarted = lazo.playing(box.getBlock());
             }
             if (!custom && access.nativeTiming() && !box.isPlaying()) access.start(box);
         }
