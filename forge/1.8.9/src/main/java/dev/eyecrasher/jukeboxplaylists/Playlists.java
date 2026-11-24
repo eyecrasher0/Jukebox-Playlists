@@ -22,6 +22,7 @@ import net.minecraft.world.WorldServer;
 
 final class Playlists {
     private static final String CURSOR = "jukebox_playlists:position";
+    private static final String ADVANCE_PENDING = "jukebox_playlists:advance_pending";
     private final Map<TileEntityJukebox, Playback> active = new WeakHashMap<>();
     private final List<TileEntityJukebox> ticking = new ArrayList<>();
 
@@ -36,13 +37,10 @@ final class Playlists {
                 IBlockState state = world.getBlockState(box.getPos());
                 if (state.getBlock() != Blocks.jukebox) continue;
                 IInventory chest = chest(world, box.getPos().up());
-                if (chest == null) {
-                    active.remove(box);
-                    continue;
-                }
-                boolean locked = chest instanceof TileEntityLockable && ((TileEntityLockable) chest).isLocked();
-                if (locked && !active.containsKey(box)) continue;
-                active.computeIfAbsent(box, ignored -> new Playback(box)).tick(world, box, chest, locked);
+                if (chest == null && !active.containsKey(box) && !box.getTileData().hasKey(ADVANCE_PENDING)) continue;
+                boolean canAdvance = chest != null
+                        && (!(chest instanceof TileEntityLockable) || !((TileEntityLockable) chest).isLocked());
+                active.computeIfAbsent(box, ignored -> new Playback(box)).tick(world, box, chest, canAdvance);
             }
         } finally {
             ticking.clear();
@@ -65,25 +63,44 @@ final class Playlists {
         private ItemStack previous;
         private long elapsed;
         private boolean resume;
+        private boolean pending;
 
         Playback(TileEntityJukebox box) {
-            resume = box.getTileData().hasKey(CURSOR);
+            previous = box.getRecord();
+            pending = box.getTileData().getBoolean(ADVANCE_PENDING);
+            resume = !pending && box.getTileData().hasKey(CURSOR);
         }
 
-        void tick(WorldServer world, TileEntityJukebox box, IInventory chest, boolean locked) {
+        void tick(WorldServer world, TileEntityJukebox box, IInventory chest, boolean canAdvance) {
             ItemStack current = box.getRecord();
-            if (!empty(current) && current != previous) {
+            if (current != previous) {
                 previous = current;
                 elapsed = 0;
-                if (resume && current.getItem() instanceof ItemRecord) sound(world, box, current);
+                resume = false;
+                setPending(box, false);
+            }
+            if (empty(current)) {
+                setPending(box, false);
+                if (canAdvance) advance(world, box, chest, null);
+            } else if (current.getItem() instanceof ItemRecord) {
+                if (resume) sound(world, box, current);
+                long length = length((ItemRecord) current.getItem());
+                if (pending || (++elapsed >= length + 20 && length > 0)) {
+                    setPending(box, !canAdvance);
+                    if (canAdvance) advance(world, box, chest, current);
+                }
+            } else {
+                setPending(box, false);
             }
             resume = false;
-            if (empty(current)) {
-                if (!locked) advance(world, box, chest, null);
-            } else if (current.getItem() instanceof ItemRecord) {
-                long length = length((ItemRecord) current.getItem());
-                if (++elapsed >= length + 20 && length > 0 && !locked) advance(world, box, chest, current);
-            }
+        }
+
+        private void setPending(TileEntityJukebox box, boolean value) {
+            if (pending == value) return;
+            pending = value;
+            if (value) box.getTileData().setBoolean(ADVANCE_PENDING, true);
+            else box.getTileData().removeTag(ADVANCE_PENDING);
+            box.markDirty();
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {
@@ -105,10 +122,9 @@ final class Playlists {
                 return;
             }
             if (current != null) {
+                if (canReturn) box.getTileData().setInteger(CURSOR, -1);
                 play(world, box, current);
-                return;
-            }
-            if (cursor >= 0) {
+            } else if (box.getTileData().hasKey(CURSOR)) {
                 box.getTileData().removeTag(CURSOR);
                 box.markDirty();
             }

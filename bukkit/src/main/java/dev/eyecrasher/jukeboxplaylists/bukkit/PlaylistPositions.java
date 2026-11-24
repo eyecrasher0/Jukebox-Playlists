@@ -9,6 +9,7 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Objects;
 import java.util.Properties;
 import org.bukkit.Chunk;
 import org.bukkit.block.Block;
@@ -16,6 +17,8 @@ import org.bukkit.plugin.Plugin;
 
 /** Stores the cursor with its chunk. Bukkit 1.12.2 has no persistent data API. */
 final class PlaylistPositions {
+    private static final String SLOT = "slot";
+    private static final String PENDING = "pending";
     private final Properties legacy = new Properties();
     private final Path legacyFile;
     private final Method container = ServerTasks.optional(Chunk.class, "getPersistentDataContainer");
@@ -47,26 +50,49 @@ final class PlaylistPositions {
     }
 
     int load(Chunk chunk, Block block) {
+        return load(chunk, block, SLOT);
+    }
+
+    boolean pending(Chunk chunk, Block block) {
+        return load(chunk, block, PENDING) == 1;
+    }
+
+    private int load(Chunk chunk, Block block, String property) {
         if (container != null) {
-            Object value = ServerTasks.call(get, ServerTasks.call(container, chunk), key(block), integer);
+            Object value = ServerTasks.call(get, ServerTasks.call(container, chunk), key(block, property), integer);
             return value instanceof Integer ? (Integer) value : -1;
         }
         try {
-            return Integer.parseInt(legacy.getProperty(legacyKey(block), "-1"));
+            return Integer.parseInt(legacy.getProperty(legacyKey(block, property), "-1"));
         } catch (NumberFormatException invalid) {
             return -1;
         }
     }
 
     void store(Chunk chunk, Block block, int slot) {
+        store(chunk, block, SLOT, slot);
+    }
+
+    void pending(Chunk chunk, Block block, boolean pending) {
+        store(chunk, block, PENDING, pending ? 1 : -1);
+    }
+
+    void clear(Chunk chunk, Block block) {
+        store(chunk, block, -1);
+        pending(chunk, block, false);
+    }
+
+    private void store(Chunk chunk, Block block, String property, int value) {
         if (container != null) {
             Object data = ServerTasks.call(container, chunk);
-            if (slot < 0) ServerTasks.call(remove, data, key(block));
-            else ServerTasks.call(set, data, key(block), integer, slot);
+            Object positionKey = key(block, property);
+            if (value == -1) ServerTasks.call(remove, data, positionKey);
+            else ServerTasks.call(set, data, positionKey, integer, value);
         } else {
-            if (slot < 0) legacy.remove(legacyKey(block));
-            else legacy.setProperty(legacyKey(block), Integer.toString(slot));
-            dirty = true;
+            String positionKey = legacyKey(block, property);
+            String encoded = value == -1 ? null : Integer.toString(value);
+            Object previous = encoded == null ? legacy.remove(positionKey) : legacy.setProperty(positionKey, encoded);
+            if (!Objects.equals(previous, encoded)) dirty = true;
         }
     }
 
@@ -87,15 +113,16 @@ final class PlaylistPositions {
         }
     }
 
-    private Object key(Block block) {
+    private Object key(Block block, String property) {
         try {
-            return key.newInstance("jukebox_playlists", "slot/" + (block.getX() & 15) + "/" + block.getY() + "/" + (block.getZ() & 15));
+            return key.newInstance("jukebox_playlists", property + "/" + (block.getX() & 15) + "/" + block.getY() + "/" + (block.getZ() & 15));
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("Cannot create jukebox position key", failure);
         }
     }
 
-    private static String legacyKey(Block block) {
-        return block.getWorld().getUID() + "." + block.getX() + "." + block.getY() + "." + block.getZ();
+    private static String legacyKey(Block block, String property) {
+        String location = block.getWorld().getUID() + "." + block.getX() + "." + block.getY() + "." + block.getZ();
+        return SLOT.equals(property) ? location : location + "." + property;
     }
 }

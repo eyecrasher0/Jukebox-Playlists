@@ -9,8 +9,11 @@ import org.bukkit.inventory.ItemStack;
 
 /** Associates a recording in a chest slot with the player who put it there. */
 final class RecordingApprovals {
+    private final JukeboxAccess access;
     private final Map<Integer, Approval> approved = new HashMap<>();
     private final Map<Integer, Approval> pending = new HashMap<>();
+
+    RecordingApprovals(JukeboxAccess access) { this.access = access; }
 
     void update(Inventory chest) {
         approved.entrySet().removeIf(entry -> !entry.getValue().item.equals(chest.getItem(entry.getKey())));
@@ -19,7 +22,8 @@ final class RecordingApprovals {
             Approval expected = entry.getValue();
             ItemStack actual = chest.getItem(slot);
             if (!JukeboxAccess.empty(actual) && expected.item.isSimilar(actual)
-                    && !Objects.equals(expected.before, actual)) {
+                    && (!Objects.equals(expected.before, actual)
+                        || (expected.replacement != null && expected.replacement == access.stackIdentity(actual)))) {
                 store(slot, actual, expected.player);
             }
         }
@@ -28,7 +32,9 @@ final class RecordingApprovals {
 
     void expect(Inventory chest, int slot, ItemStack incoming, UUID player) {
         ItemStack previous = chest.getItem(slot);
-        pending.put(slot, new Approval(incoming.clone(), player, previous == null ? null : previous.clone()));
+        Object replacement = Objects.equals(previous, incoming) ? access.stackIdentity(incoming) : null;
+        if (replacement != null && replacement == access.stackIdentity(previous)) replacement = null;
+        pending.put(slot, new Approval(incoming.clone(), player, previous == null ? null : previous.clone(), replacement));
     }
 
     UUID player(int slot) {
@@ -38,18 +44,10 @@ final class RecordingApprovals {
 
     void store(int slot, ItemStack item, UUID player) {
         if (player == null || JukeboxAccess.empty(item)) approved.remove(slot);
-        else approved.put(slot, new Approval(item.clone(), player, null));
+        else approved.put(slot, new Approval(item.clone(), player, null, null));
     }
 
-    void forget(int slot) {
-        approved.remove(slot);
-        pending.remove(slot);
-    }
-
-    void forget(ItemStack moved) {
-        approved.values().removeIf(entry -> entry.item.isSimilar(moved));
-        pending.values().removeIf(entry -> entry.item.isSimilar(moved));
-    }
+    boolean isEmpty() { return approved.isEmpty() && pending.isEmpty(); }
 
     void clear() {
         approved.clear();
@@ -60,11 +58,13 @@ final class RecordingApprovals {
         final ItemStack item;
         final UUID player;
         final ItemStack before;
+        final Object replacement;
 
-        Approval(ItemStack item, UUID player, ItemStack before) {
+        Approval(ItemStack item, UUID player, ItemStack before, Object replacement) {
             this.item = item;
             this.player = player;
             this.before = before;
+            this.replacement = replacement;
         }
     }
 }

@@ -16,6 +16,6 @@ Place a single chest directly above a jukebox and add music discs. Each complete
 Vanilla and modded discs need no duration configuration. LazoDiscs recordings use their actual playback completion on supported LazoDiscs and Plasmo Voice setups. Forge 1.20.2 with LazoDiscs 1.0.7 uses the Plasmo Voice fix from the [1.0.1 release](https://github.com/eyecrasher0/Jukebox-Playlists/releases/tag/v1.0.1).
 Use an unlocked chest for the playlist. On Bukkit, starting a LazoDiscs recording from the chest or repeating it requires its depositor to be online with `lazodiscs.play`. On Folia, that player must be in the jukebox's region when playback starts. LazoDiscs handles resuming recordings already in the jukebox after a chunk reload.
 
-Run `./gradlew build` in `bukkit/` or in the relevant loader and version directory. Use JDK 8 for Forge 1.7.10, 1.8.9 and 1.12.2, and the toolchains specified in `build.gradle` for other builds.
+Run `./gradlew build` in `bukkit/` or in the relevant loader and version directory. Launch the Bukkit wrapper with JDK 17 or newer. The plugin targets Java 8. Use JDK 8 for Forge 1.7.10, 1.8.9 and 1.12.2, and the toolchains specified in `build.gradle` for other builds.
 
 [GPL-3.0-only](LICENSE)

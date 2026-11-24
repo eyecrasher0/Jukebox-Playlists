@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.Optional;
 import org.bukkit.Bukkit;
 import org.bukkit.Effect;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
@@ -29,11 +30,16 @@ final class JukeboxAccess {
     private final Method copyForSong;
     private final Method worldHandle;
     private final Method registryAccess;
+    private final Field stackHandle;
     private final Method blockData = ServerTasks.optional(Block.class, "getBlockData");
     private final Method liveState = ServerTasks.optional(Block.class, "getState", boolean.class);
     private final Method locked = ServerTasks.optional(Chest.class, "isLocked");
     private final Class<?> chestData;
     private final Method chestType;
+    private final Method chestFacing;
+    private final Method chestSnapshot;
+    private final Field predicateLock;
+    private final Object noLock;
     private final Method snapshot;
     private final Field liveRecordPlayer;
     private final Method markDirty;
@@ -44,11 +50,14 @@ final class JukeboxAccess {
 
     JukeboxAccess() throws ReflectiveOperationException {
         String craft = Bukkit.getServer().getClass().getPackage().getName();
+        Class<?> craftStack = Class.forName(craft + ".inventory.CraftItemStack");
+        stackHandle = craftStack.getDeclaredField("handle");
+        stackHandle.setAccessible(true);
         Class<?> songs = songType();
         if (songs == null) {
             songFromStack = copyForSong = worldHandle = registryAccess = null;
         } else {
-            copyForSong = Class.forName(craft + ".inventory.CraftItemStack").getMethod("asNMSCopy", ItemStack.class);
+            copyForSong = craftStack.getMethod("asNMSCopy", ItemStack.class);
             Class<?> nativeStack = copyForSong.getReturnType();
             // Native lookup accounts for item defaults, removed components and registry resolution.
             songFromStack = Arrays.stream(songs.getMethods())
@@ -69,10 +78,30 @@ final class JukeboxAccess {
         }
         if (blockData == null) {
             chestData = null;
-            chestType = null;
+            chestType = chestFacing = null;
         } else {
             chestData = Class.forName("org.bukkit.block.data.type.Chest");
             chestType = chestData.getMethod("getType");
+            chestFacing = chestData.getMethod("getFacing");
+        }
+        if (ServerTasks.optional(Chest.class, "setLockItem", ItemStack.class) == null) {
+            chestSnapshot = null;
+            predicateLock = null;
+            noLock = null;
+        } else {
+            Class<?> container = Class.forName(craft + ".block.CraftContainer");
+            chestSnapshot = container.getSuperclass().getDeclaredMethod("getSnapshot");
+            chestSnapshot.setAccessible(true);
+            Class<?> nativeContainer = (Class<?>) container.getTypeParameters()[0].getBounds()[0];
+            Class<?> record = Class.forName("java.lang.Record");
+            predicateLock = Arrays.stream(nativeContainer.getDeclaredFields())
+                    .filter(field -> !Modifier.isStatic(field.getModifiers()) && record.isAssignableFrom(field.getType()))
+                    .findFirst().orElseThrow(() -> new NoSuchFieldException("Container lock predicate"));
+            predicateLock.setAccessible(true);
+            Class<?> lockType = predicateLock.getType();
+            noLock = Arrays.stream(lockType.getFields())
+                    .filter(field -> Modifier.isStatic(field.getModifiers()) && field.getType() == lockType)
+                    .findFirst().orElseThrow(() -> new NoSuchFieldException("Unlocked container sentinel")).get(null);
         }
         if (getRecord != null) {
             snapshot = nativeGet = nativeSet = fromNative = toNative = null;
@@ -97,12 +126,20 @@ final class JukeboxAccess {
         }
         nativeGet = nativeType.getMethod("getRecord");
         nativeSet = nativeType.getMethod("setRecord", nativeGet.getReturnType());
-        Class<?> craftStack = Class.forName(craft + ".inventory.CraftItemStack");
         fromNative = craftStack.getMethod("asBukkitCopy", nativeGet.getReturnType());
         toNative = craftStack.getMethod("asNMSCopy", ItemStack.class);
     }
 
     boolean nativeTiming() { return startPlaying != null; }
+
+    Object stackIdentity(ItemStack item) {
+        if (!stackHandle.getDeclaringClass().isInstance(item)) return null;
+        try {
+            return stackHandle.get(item);
+        } catch (IllegalAccessException failure) {
+            throw new IllegalStateException("Cannot identify the native item stack", failure);
+        }
+    }
 
     private static Class<?> songType() {
         try {
@@ -194,24 +231,43 @@ final class JukeboxAccess {
         return ((Optional<?>) ServerTasks.call(songFromStack, null, registries, stack)).isPresent();
     }
 
-    Chest singleChest(Block block) {
-        if (!isChest(block.getType())) return null;
-        if (blockData != null) {
-            Object data = ServerTasks.call(blockData, block);
-            if (chestData.isInstance(data) && !"SINGLE".equals(((Enum<?>) ServerTasks.call(chestType, data)).name()))
-                return null;
-        } else {
-            for (BlockFace face : new BlockFace[]{BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST}) {
-                Block adjacent = block.getRelative(face);
-                if (!adjacent.getWorld().isChunkLoaded(adjacent.getX() >> 4, adjacent.getZ() >> 4)) return null;
-                if (adjacent.getType() == block.getType()) return null;
-            }
+    boolean isSingleChest(Block block) {
+        Material material = block.getType();
+        if (!isChest(material)) return false;
+        if (blockData != null) return chestPartner(block) == null;
+        for (BlockFace face : new BlockFace[]{BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST}) {
+            Block adjacent = block.getRelative(face);
+            if (!adjacent.getWorld().isChunkLoaded(adjacent.getX() >> 4, adjacent.getZ() >> 4)) return false;
+            if (adjacent.getType() == material) return false;
         }
+        return true;
+    }
+
+    Location chestPartner(Block block) {
+        if (blockData == null) return null;
+        Object data = ServerTasks.call(blockData, block);
+        if (!chestData.isInstance(data)) return null;
+        String type = ((Enum<?>) ServerTasks.call(chestType, data)).name();
+        if ("SINGLE".equals(type)) return null;
+        BlockFace facing = (BlockFace) ServerTasks.call(chestFacing, data);
+        int turn = "LEFT".equals(type) ? 1 : -1;
+        return block.getLocation().add(-turn * facing.getModZ(), 0, turn * facing.getModX());
+    }
+
+    Chest singleChest(Block block) {
+        if (!isSingleChest(block)) return null;
         BlockState state = state(block);
         return state instanceof Chest ? (Chest) state : null;
     }
 
-    boolean isLocked(Chest chest) { return locked != null && (Boolean) ServerTasks.call(locked, chest); }
+    boolean isLocked(Chest chest) {
+        if (predicateLock == null) return locked != null && (Boolean) ServerTasks.call(locked, chest);
+        try {
+            return !noLock.equals(predicateLock.get(ServerTasks.call(chestSnapshot, chest)));
+        } catch (IllegalAccessException failure) {
+            throw new IllegalStateException("Cannot read the native chest lock", failure);
+        }
+    }
 
     static boolean isChest(Material material) {
         String name = material.name();

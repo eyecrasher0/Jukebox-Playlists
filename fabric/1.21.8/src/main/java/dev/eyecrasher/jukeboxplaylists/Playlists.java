@@ -33,7 +33,7 @@ public final class Playlists {
         }
         BlockEntity containerEntity = level.getBlockEntity(position.above());
         if (containerEntity instanceof ContainerLockAccessor
-                && ((ContainerLockAccessor) containerEntity).jukeboxPlaylists$getLock() != LockCode.NO_LOCK) {
+                && !LockCode.NO_LOCK.equals(((ContainerLockAccessor) containerEntity).jukeboxPlaylists$getLock())) {
             return false;
         }
         if (!(containerEntity instanceof Container)) {

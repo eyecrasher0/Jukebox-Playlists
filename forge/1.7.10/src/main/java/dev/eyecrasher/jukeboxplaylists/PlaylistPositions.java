@@ -24,11 +24,11 @@ public final class PlaylistPositions extends WorldSavedData {
     static void store(WorldServer world, TileEntity box, int slot) {
         PlaylistPositions state = (PlaylistPositions) world.perWorldStorage.loadData(PlaylistPositions.class, NAME);
         if (state == null) {
-            if (slot < 0) return;
+            if (slot == -1) return;
             state = new PlaylistPositions(NAME);
             world.perWorldStorage.setData(NAME, state);
         }
-        if (slot < 0) state.slots.removeTag(key(box));
+        if (slot == -1) state.slots.removeTag(key(box));
         else state.slots.setInteger(key(box), slot);
         state.markDirty();
     }

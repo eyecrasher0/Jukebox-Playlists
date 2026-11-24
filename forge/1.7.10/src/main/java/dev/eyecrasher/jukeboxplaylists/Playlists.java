@@ -55,15 +55,16 @@ final class Playlists {
     }
 
     private static final class Playback {
+        private static final int REPEATING = -2;
         private ItemStack previous;
         private long elapsed;
         private boolean resume;
 
-        private int cursor;
+        private int position;
 
         Playback(WorldServer world, TileEntityJukebox box) {
-            cursor = empty(box.func_145856_a()) ? -1 : PlaylistPositions.get(world, box);
-            resume = cursor >= 0;
+            position = PlaylistPositions.get(world, box);
+            resume = position != -1;
         }
 
         void tick(WorldServer world, TileEntityJukebox box, IInventory chest) {
@@ -86,7 +87,7 @@ final class Playlists {
             boolean canReturn = current == null
                     || current.stackSize <= Math.min(current.getMaxStackSize(), chest.getInventoryStackLimit());
             int size = chest.getSizeInventory();
-            if (cursor < -1 || cursor >= size) cursor = -1;
+            int cursor = position < -1 || position >= size ? -1 : position;
             for (int offset = 1; canReturn && offset <= size; offset++) {
                 int slot = (cursor + offset) % size;
                 ItemStack next = chest.getStackInSlot(slot);
@@ -94,19 +95,18 @@ final class Playlists {
                         || next.stackSize > next.getMaxStackSize()) continue;
                 play(world, box, next.copy());
                 chest.setInventorySlotContents(slot, current);
-                cursor = slot;
-                PlaylistPositions.store(world, box, slot);
+                setPosition(world, box, slot);
                 chest.markDirty();
                 return;
             }
-            if (current != null) {
-                play(world, box, current);
-                return;
-            }
-            if (cursor >= 0) {
-                cursor = -1;
-                PlaylistPositions.store(world, box, -1);
-            }
+            if (canReturn) setPosition(world, box, current == null ? -1 : REPEATING);
+            if (current != null) play(world, box, current);
+        }
+
+        private void setPosition(WorldServer world, TileEntityJukebox box, int slot) {
+            if (position == slot) return;
+            position = slot;
+            PlaylistPositions.store(world, box, slot);
         }
 
         private void play(WorldServer world, TileEntityJukebox box, ItemStack record) {

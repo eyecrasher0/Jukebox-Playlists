@@ -4,6 +4,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.bukkit.block.Block;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
@@ -17,7 +19,13 @@ final class LazoDiscsPlayback {
     private final Method key;
     private final Method sync;
     private final Method retire;
-    private final Field active;
+    private final Map<?, ?> active;
+    private final Map<?, ?> completed;
+    private final Field entryDisc;
+    private final Field entrySession;
+    private final Field stream;
+    private final Field closed;
+    private final Field failure;
     private final Object voice;
     private final Method ready;
     private final Object sounds;
@@ -35,7 +43,17 @@ final class LazoDiscsPlayback {
         Class<?> position = Class.forName(type.getName() + "$Key", false, loader);
         key = method(position, "of", Block.class);
         sync = method(type, "sync", Block.class, boolean.class);
-        active = field(type, "active");
+        active = (Map<?, ?>) field(type, "active").get(manager);
+        Field completedField = optionalField(type, "completed");
+        completed = completedField == null ? null : (Map<?, ?>) completedField.get(manager);
+        Class<?> entry = Class.forName(type.getName() + "$Entry", false, loader);
+        entryDisc = field(entry, "disc");
+        entrySession = field(entry, "session");
+        Class<?> sessionType = entrySession.getType();
+        stream = optionalField(sessionType, "stream");
+        Class<?> state = stream == null ? sessionType : stream.getType();
+        closed = field(state, "closed");
+        failure = field(state, stream == null ? "failure" : "sinkStopped");
         retire = optionalMethod(type, "retireCompleted", position);
         voice = field(type, "voice").get(manager);
         ready = voice.getClass().getMethod("isReady");
@@ -52,7 +70,24 @@ final class LazoDiscsPlayback {
 
     boolean ready() { return plugin.isEnabled() && (Boolean) ServerTasks.call(ready, voice); }
 
-    boolean playing(Block block) { return entries(active).containsKey(position(block)); }
+    Object session(Block block, ItemStack record) {
+        Object entry = active.get(position(block));
+        if (entry == null) return null;
+        Optional<?> disc = (Optional<?>) ServerTasks.call(read, null, record);
+        return disc.isPresent() && disc.get().equals(value(entryDisc, entry)) ? value(entrySession, entry) : null;
+    }
+
+    boolean finished(Block block, Object session) {
+        if (session == null) return false;
+        if (completed != null) {
+            Object entry = completed.get(position(block));
+            if (entry == null || value(entrySession, entry) != session) return false;
+        }
+        Object state = stream == null ? session : value(stream, session);
+        if (!((AtomicBoolean) value(closed, state)).get()) return false;
+        Object outcome = value(failure, state);
+        return stream == null ? ((AtomicReference<?>) outcome).get() == null : !((AtomicBoolean) outcome).get();
+    }
 
     void changed(Block block, boolean replay) {
         if (!plugin.isEnabled()) return;
@@ -68,9 +103,9 @@ final class LazoDiscsPlayback {
 
     private Object position(Block block) { return ServerTasks.call(key, null, block); }
 
-    private Map<?, ?> entries(Field field) {
+    private static Object value(Field field, Object target) {
         try {
-            return (Map<?, ?>) field.get(manager);
+            return field.get(target);
         } catch (IllegalAccessException failure) {
             throw new IllegalStateException(field.getName(), failure);
         }
