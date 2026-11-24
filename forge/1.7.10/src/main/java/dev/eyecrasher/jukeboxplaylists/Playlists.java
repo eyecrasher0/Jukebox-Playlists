@@ -64,6 +64,7 @@ final class Playlists {
 
         Playback(WorldServer world, TileEntityJukebox box) {
             position = PlaylistPositions.get(world, box);
+            if (empty(box.func_145856_a())) setPosition(world, box, -1);
             resume = position != -1;
         }
 

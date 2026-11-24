@@ -6,6 +6,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import org.bukkit.Bukkit;
 import org.bukkit.Effect;
@@ -19,6 +21,7 @@ import org.bukkit.block.Chest;
 import org.bukkit.block.Jukebox;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 
 /** Uses the installed Bukkit API, with a full-stack bridge for 1.7.10 and 1.12.2. */
 final class JukeboxAccess {
@@ -26,6 +29,11 @@ final class JukeboxAccess {
     private final Method setRecord = ServerTasks.optional(Jukebox.class, "setRecord", ItemStack.class);
     private final Method inventory = ServerTasks.optional(Jukebox.class, "getInventory");
     private final Method startPlaying = ServerTasks.optional(Jukebox.class, "startPlaying");
+    private final Method itemData = ServerTasks.optional(ItemMeta.class, "getPersistentDataContainer");
+    private final Method hasTag;
+    private final Object recordingKey;
+    private final Object tagContainer;
+    private final Method bundleItems;
     private final Method songFromStack;
     private final Method copyForSong;
     private final Method worldHandle;
@@ -49,6 +57,17 @@ final class JukeboxAccess {
     private final Method toNative;
 
     JukeboxAccess() throws ReflectiveOperationException {
+        if (itemData == null) {
+            recordingKey = tagContainer = null;
+            hasTag = null;
+        } else {
+            Class<?> namespacedKey = Class.forName("org.bukkit.NamespacedKey");
+            Class<?> dataType = Class.forName("org.bukkit.persistence.PersistentDataType");
+            recordingKey = namespacedKey.getConstructor(String.class, String.class).newInstance("lazodiscs", "disc");
+            tagContainer = dataType.getField("TAG_CONTAINER").get(null);
+            hasTag = itemData.getReturnType().getMethod("has", namespacedKey, dataType);
+        }
+        bundleItems = bundleItemsMethod();
         String craft = Bukkit.getServer().getClass().getPackage().getName();
         Class<?> craftStack = Class.forName(craft + ".inventory.CraftItemStack");
         stackHandle = craftStack.getDeclaredField("handle");
@@ -229,6 +248,28 @@ final class JukeboxAccess {
         if (registryAccess == null) return ((Optional<?>) ServerTasks.call(songFromStack, null, stack)).isPresent();
         Object registries = ServerTasks.call(registryAccess, ServerTasks.call(worldHandle, world));
         return ((Optional<?>) ServerTasks.call(songFromStack, null, registries, stack)).isPresent();
+    }
+
+    boolean isRecording(ItemStack item) {
+        if (itemData == null || empty(item) || !item.hasItemMeta()) return false;
+        ItemMeta meta = item.getItemMeta();
+        return meta != null && (Boolean) ServerTasks.call(hasTag, ServerTasks.call(itemData, meta), recordingKey, tagContainer);
+    }
+
+    @SuppressWarnings("unchecked")
+    List<ItemStack> bundleContents(ItemStack item) {
+        if (bundleItems == null || empty(item) || !item.hasItemMeta()) return Collections.emptyList();
+        ItemMeta meta = item.getItemMeta();
+        if (!bundleItems.getDeclaringClass().isInstance(meta)) return Collections.emptyList();
+        return (List<ItemStack>) ServerTasks.call(bundleItems, meta);
+    }
+
+    private static Method bundleItemsMethod() throws NoSuchMethodException {
+        try {
+            return Class.forName("org.bukkit.inventory.meta.BundleMeta").getMethod("getItems");
+        } catch (ClassNotFoundException legacy) {
+            return null;
+        }
     }
 
     boolean isSingleChest(Block block) {
