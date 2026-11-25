@@ -211,8 +211,18 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void moved(InventoryMoveItemEvent event) {
         if (lazo == null) return;
-        invalidateDoubleChest(event.getSource());
-        invalidateDoubleChest(event.getDestination());
+        boolean recording = access.isRecording(event.getItem());
+        beforeInventoryMove(event.getSource(), recording);
+        beforeInventoryMove(event.getDestination(), recording);
+    }
+
+    private void beforeInventoryMove(Inventory inventory, boolean recording) {
+        if (!recording) {
+            invalidateDoubleChest(inventory);
+            return;
+        }
+        Playback playback = playbackFor(inventory);
+        if (playback != null && !playback.recordings.isEmpty()) playback.recordings.update(inventory);
     }
 
     private Playback playbackFor(Inventory chest) {
@@ -472,7 +482,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                 ItemStack returned = current == null ? null : current.clone();
                 if (!insert(box, candidate, custom, approver)) continue;
                 chest.setItem(slot, returned);
-                if (lazo != null) recordings.store(slot, returned, returnedApprover);
+                if (lazo != null) recordings.store(slot, chest.getItem(slot), returnedApprover);
                 setPosition(chunk, block, slot);
                 afterInsert(box, candidate, custom, approver);
                 return;
