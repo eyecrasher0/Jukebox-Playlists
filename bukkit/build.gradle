@@ -22,7 +22,5 @@ processResources {
 }
 
 jar {
-    preserveFileTimestamps = false
-    reproducibleFileOrder = true
     from('LICENSE') { rename { 'LICENSE_jukebox-playlists.txt' } }
 }
