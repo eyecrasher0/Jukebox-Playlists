@@ -13,6 +13,9 @@ import java.util.Objects;
 import java.util.Properties;
 import org.bukkit.Chunk;
 import org.bukkit.block.Block;
+import org.bukkit.configuration.InvalidConfigurationException;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 
 /** Stores the cursor with its chunk. Bukkit 1.12.2 has no persistent data API. */
@@ -24,6 +27,8 @@ final class PlaylistPositions {
     private final Method container = ServerTasks.optional(Chunk.class, "getPersistentDataContainer");
     private final Constructor<?> key;
     private final Object integer;
+    private final Object string;
+    private final Method has;
     private final Method get;
     private final Method set;
     private final Method remove;
@@ -33,8 +38,8 @@ final class PlaylistPositions {
         legacyFile = plugin.getDataFolder().toPath().resolve("positions.properties");
         if (container == null) {
             key = null;
-            integer = null;
-            get = set = remove = null;
+            integer = string = null;
+            has = get = set = remove = null;
             if (Files.isRegularFile(legacyFile)) {
                 try (InputStream input = Files.newInputStream(legacyFile)) { legacy.load(input); }
             }
@@ -44,56 +49,92 @@ final class PlaylistPositions {
         key = namespacedKey.getConstructor(String.class, String.class);
         Class<?> type = Class.forName("org.bukkit.persistence.PersistentDataType");
         integer = type.getField("INTEGER").get(null);
+        string = type.getField("STRING").get(null);
+        has = container.getReturnType().getMethod("has", namespacedKey, type);
         get = container.getReturnType().getMethod("get", namespacedKey, type);
         set = container.getReturnType().getMethod("set", namespacedKey, type, Object.class);
         remove = container.getReturnType().getMethod("remove", namespacedKey);
     }
 
     int load(Chunk chunk, Block block) {
-        return load(chunk, block, SLOT);
-    }
-
-    boolean pending(Chunk chunk, Block block) {
-        return load(chunk, block, PENDING) == 1;
-    }
-
-    private int load(Chunk chunk, Block block, String property) {
         if (container != null) {
-            Object value = ServerTasks.call(get, ServerTasks.call(container, chunk), key(block, property), integer);
+            Object value = ServerTasks.call(get, ServerTasks.call(container, chunk), key(block, SLOT), integer);
             return value instanceof Integer ? (Integer) value : -1;
         }
         try {
-            return Integer.parseInt(legacy.getProperty(legacyKey(block, property), "-1"));
+            return Integer.parseInt(legacy.getProperty(legacyKey(block, SLOT), "-1"));
         } catch (NumberFormatException invalid) {
             return -1;
         }
     }
 
-    void store(Chunk chunk, Block block, int slot) {
-        store(chunk, block, SLOT, slot);
+    boolean restorePending(Chunk chunk, Block block, ItemStack current, boolean recording) {
+        String saved;
+        if (container == null) {
+            saved = legacy.getProperty(legacyKey(block, PENDING));
+        } else {
+            Object data = ServerTasks.call(container, chunk);
+            Object positionKey = key(block, PENDING);
+            if ((Boolean) ServerTasks.call(has, data, positionKey, string)) {
+                saved = (String) ServerTasks.call(get, data, positionKey, string);
+            } else {
+                saved = (Boolean) ServerTasks.call(has, data, positionKey, integer)
+                        && Integer.valueOf(1).equals(ServerTasks.call(get, data, positionKey, integer)) ? "1" : null;
+            }
+        }
+        if (saved == null) return false;
+        if (current != null && ("1".equals(saved) ? !recording : matchesRecord(saved, current))) return true;
+        pending(chunk, block, null);
+        return false;
     }
 
-    void pending(Chunk chunk, Block block, boolean pending) {
-        store(chunk, block, PENDING, pending ? 1 : -1);
+    private static boolean matchesRecord(String saved, ItemStack current) {
+        YamlConfiguration data = new YamlConfiguration();
+        try {
+            data.loadFromString(saved);
+            return current.equals(data.getItemStack("record"));
+        } catch (InvalidConfigurationException | IllegalArgumentException invalid) {
+            return false;
+        }
+    }
+
+    void store(Chunk chunk, Block block, int slot) {
+        if (container != null) {
+            Object data = ServerTasks.call(container, chunk);
+            Object positionKey = key(block, SLOT);
+            if (slot == -1) ServerTasks.call(remove, data, positionKey);
+            else ServerTasks.call(set, data, positionKey, integer, slot);
+        } else {
+            storeLegacy(block, SLOT, slot == -1 ? null : Integer.toString(slot));
+        }
+    }
+
+    void pending(Chunk chunk, Block block, ItemStack record) {
+        String encoded = null;
+        if (record != null) {
+            YamlConfiguration data = new YamlConfiguration();
+            data.set("record", record);
+            encoded = data.saveToString();
+        }
+        if (container == null) {
+            storeLegacy(block, PENDING, encoded);
+        } else {
+            Object data = ServerTasks.call(container, chunk);
+            Object positionKey = key(block, PENDING);
+            if (encoded == null) ServerTasks.call(remove, data, positionKey);
+            else ServerTasks.call(set, data, positionKey, string, encoded);
+        }
     }
 
     void clear(Chunk chunk, Block block) {
         store(chunk, block, -1);
-        pending(chunk, block, false);
+        pending(chunk, block, null);
     }
 
-    private void store(Chunk chunk, Block block, String property, int value) {
-        if (container != null) {
-            Object data = ServerTasks.call(container, chunk);
-            Object positionKey = key(block, property);
-            if (value == -1) ServerTasks.call(remove, data, positionKey);
-            else ServerTasks.call(set, data, positionKey, integer, value);
-        } else {
-            String positionKey = legacyKey(block, property);
-            String encoded = value == -1 ? null : Integer.toString(value);
-            Object previous = encoded == null ? legacy.remove(positionKey) : legacy.setProperty(positionKey, encoded);
-            if (!Objects.equals(previous, encoded)) dirty = true;
-        }
+    private void storeLegacy(Block block, String property, String encoded) {
+        String positionKey = legacyKey(block, property);
+        Object previous = encoded == null ? legacy.remove(positionKey) : legacy.setProperty(positionKey, encoded);
+        if (!Objects.equals(previous, encoded)) dirty = true;
     }
 
     void saveLegacy() throws IOException {

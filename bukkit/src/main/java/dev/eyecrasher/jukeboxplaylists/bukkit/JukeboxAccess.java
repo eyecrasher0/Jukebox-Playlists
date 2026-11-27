@@ -5,6 +5,7 @@ import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -20,6 +21,7 @@ import org.bukkit.block.BlockState;
 import org.bukkit.block.Chest;
 import org.bukkit.block.Jukebox;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
@@ -39,6 +41,11 @@ final class JukeboxAccess {
     private final Method worldHandle;
     private final Method registryAccess;
     private final Field stackHandle;
+    private final Method menuHandle;
+    private final Method humanHandle;
+    private final Method menuClick;
+    private final Method jukeboxHandle;
+    private final Method jukeboxItem;
     private final Method blockData = ServerTasks.optional(Block.class, "getBlockData");
     private final Method liveState = ServerTasks.optional(Block.class, "getState", boolean.class);
     private final Method locked = ServerTasks.optional(Chest.class, "isLocked");
@@ -72,6 +79,32 @@ final class JukeboxAccess {
         Class<?> craftStack = Class.forName(craft + ".inventory.CraftItemStack");
         stackHandle = craftStack.getDeclaredField("handle");
         stackHandle.setAccessible(true);
+        if (itemData == null) {
+            menuHandle = humanHandle = menuClick = null;
+        } else {
+            menuHandle = ServerTasks.optional(Class.forName(craft + ".inventory.CraftInventoryView"), "getHandle");
+            humanHandle = Class.forName(craft + ".entity.CraftHumanEntity").getMethod("getHandle");
+            menuClick = menuHandle == null ? null : Arrays.stream(menuHandle.getReturnType().getMethods())
+                    .filter(method -> isMenuClick(method, humanHandle.getReturnType(), stackHandle.getType()))
+                    .findFirst().orElse(null);
+        }
+        if (inventory == null && !craft.endsWith(".v1_7_R4")) {
+            Class<?> craftJukebox = Class.forName(craft + ".block.CraftJukebox");
+            Method handle = ServerTasks.optional(craftJukebox, "getBlockEntity");
+            jukeboxHandle = handle == null ? ServerTasks.optional(craftJukebox, "getTileEntity") : handle;
+            if (jukeboxHandle != null && craftJukebox.getGenericSuperclass() instanceof ParameterizedType) {
+                Class<?> nativeJukebox = (Class<?>) ((ParameterizedType) craftJukebox.getGenericSuperclass())
+                        .getActualTypeArguments()[0];
+                jukeboxItem = Arrays.stream(nativeJukebox.getMethods())
+                        .filter(method -> !Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0
+                                && method.getReturnType() == stackHandle.getType())
+                        .findFirst().orElse(null);
+            } else {
+                jukeboxItem = null;
+            }
+        } else {
+            jukeboxHandle = jukeboxItem = null;
+        }
         Class<?> songs = songType();
         if (songs == null) {
             songFromStack = copyForSong = worldHandle = registryAccess = null;
@@ -160,6 +193,25 @@ final class JukeboxAccess {
         }
     }
 
+    private static boolean isMenuClick(Method method, Class<?> player, Class<?> stack) {
+        Class<?>[] args = method.getParameterTypes();
+        return !Modifier.isStatic(method.getModifiers()) && args.length == 4
+                && args[0] == int.class && args[1] == int.class && args[2].isEnum() && args[3].isAssignableFrom(player)
+                && (method.getReturnType() == void.class || method.getReturnType() == stack);
+    }
+
+    Runnable inventoryClick(InventoryView view, int slot, int button, String input) {
+        if (menuClick == null || !menuHandle.getDeclaringClass().isInstance(view)) return null;
+        Object menu = ServerTasks.call(menuHandle, view);
+        Object player = ServerTasks.call(humanHandle, view.getPlayer());
+        for (Object action : menuClick.getParameterTypes()[2].getEnumConstants()) {
+            if (((Enum<?>) action).name().equals(input)) {
+                return () -> ServerTasks.call(menuClick, menu, slot, button, action, player);
+            }
+        }
+        return null;
+    }
+
     private static Class<?> songType() {
         try {
             return Class.forName("net.minecraft.world.item.JukeboxSong");
@@ -181,6 +233,13 @@ final class JukeboxAccess {
             item = stack == null ? null : (ItemStack) ServerTasks.call(fromNative, null, stack);
         }
         return empty(item) ? null : item;
+    }
+
+    Object recordIdentity(Jukebox box, ItemStack record) {
+        if (record == null) return null;
+        if (inventory != null) return stackIdentity(record);
+        if (jukeboxItem != null) return ServerTasks.call(jukeboxItem, ServerTasks.call(jukeboxHandle, box));
+        return liveRecordPlayer == null ? null : ServerTasks.call(nativeGet, recordPlayer(box));
     }
 
     void start(Jukebox box) {
