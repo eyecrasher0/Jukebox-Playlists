@@ -11,7 +11,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.IntConsumer;
 import org.bukkit.Bukkit;
 import org.bukkit.Effect;
 import org.bukkit.Location;
@@ -83,22 +82,19 @@ final class JukeboxAccess {
         menuHandle = itemData == null ? null
                 : ServerTasks.optional(Class.forName(craft + ".inventory.CraftInventoryView"), "getHandle");
         menuListeners = menuHandle == null ? null : slotListeners(menuHandle.getReturnType(), stackHandle.getType());
-        if (inventory == null && !craft.endsWith(".v1_7_R4")) {
-            Class<?> craftJukebox = Class.forName(craft + ".block.CraftJukebox");
-            Method handle = ServerTasks.optional(craftJukebox, "getBlockEntity");
-            jukeboxHandle = handle == null ? ServerTasks.optional(craftJukebox, "getTileEntity") : handle;
-            if (jukeboxHandle != null && craftJukebox.getGenericSuperclass() instanceof ParameterizedType) {
-                Class<?> nativeJukebox = (Class<?>) ((ParameterizedType) craftJukebox.getGenericSuperclass())
-                        .getActualTypeArguments()[0];
-                jukeboxItem = Arrays.stream(nativeJukebox.getMethods())
-                        .filter(method -> !Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0
-                                && method.getReturnType() == stackHandle.getType())
-                        .findFirst().orElse(null);
-            } else {
-                jukeboxItem = null;
-            }
+        Class<?> craftJukebox = Class.forName(craft + ".block.CraftJukebox");
+        boolean earlyLegacy = craft.endsWith(".v1_7_R4");
+        jukeboxHandle = earlyLegacy ? null : liveJukeboxHandle(craftJukebox);
+        if (inventory == null && getRecord != null && jukeboxHandle != null
+                && craftJukebox.getGenericSuperclass() instanceof ParameterizedType) {
+            Class<?> nativeJukebox = (Class<?>) ((ParameterizedType) craftJukebox.getGenericSuperclass())
+                    .getActualTypeArguments()[0];
+            jukeboxItem = Arrays.stream(nativeJukebox.getMethods())
+                    .filter(method -> !Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0
+                            && method.getReturnType() == stackHandle.getType())
+                    .findFirst().orElse(null);
         } else {
-            jukeboxHandle = jukeboxItem = null;
+            jukeboxItem = null;
         }
         Class<?> songs = songType();
         if (songs == null) {
@@ -156,9 +152,8 @@ final class JukeboxAccess {
             markDirty = null;
             return;
         }
-        Class<?> craftJukebox = Class.forName(craft + ".block.CraftJukebox");
         Class<?> nativeType;
-        if (craft.endsWith(".v1_7_R4")) {
+        if (earlyLegacy) {
             snapshot = null;
             liveRecordPlayer = craftJukebox.getDeclaredField("jukebox");
             liveRecordPlayer.setAccessible(true);
@@ -175,6 +170,19 @@ final class JukeboxAccess {
         nativeSet = nativeType.getMethod("setRecord", nativeGet.getReturnType());
         fromNative = craftStack.getMethod("asBukkitCopy", nativeGet.getReturnType());
         toNative = craftStack.getMethod("asNMSCopy", ItemStack.class);
+    }
+
+    private static Method liveJukeboxHandle(Class<?> craftJukebox) {
+        Method handle = ServerTasks.optional(craftJukebox, "getBlockEntity");
+        if (handle == null) handle = ServerTasks.optional(craftJukebox, "getTileEntity");
+        if (handle != null) return handle;
+        try {
+            handle = craftJukebox.getSuperclass().getDeclaredMethod("getTileEntity");
+            handle.setAccessible(true);
+            return handle;
+        } catch (NoSuchMethodException absent) {
+            return null;
+        }
     }
 
     boolean nativeTiming() { return startPlaying != null; }
@@ -212,9 +220,10 @@ final class JukeboxAccess {
     }
 
     @SuppressWarnings("unchecked")
-    Runnable observeSlotChanges(InventoryView view, IntConsumer changed) {
+    Runnable observeSlotChanges(InventoryView view, Runnable committed) {
         if (menuListeners == null || !menuHandle.getDeclaringClass().isInstance(view)) return null;
         Object menu = ServerTasks.call(menuHandle, view);
+        Class<?> menuType = menuHandle.getReturnType();
         try {
             List<Object> listeners = (List<Object>) menuListeners.get(menu);
             Class<?> type = listenerType(menuListeners);
@@ -224,15 +233,31 @@ final class JukeboxAccess {
                     if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
                     return "Jukebox Playlists inventory listener";
                 }
-                if (isSlotChange(method, menuHandle.getReturnType(), stackHandle.getType())) changed.accept((Integer) args[1]);
+                if (isSlotChange(method, menuType, stackHandle.getType()) && args[0] == menu
+                        && inClickBroadcast(menuType.getName())) committed.run();
                 return null;
             });
             // The public native registration also broadcasts immediately, before Bukkit applies the click.
-            listeners.add(listener);
+            listeners.add(0, listener);
             return () -> listeners.remove(listener);
         } catch (IllegalAccessException inaccessible) {
             return null;
         }
+    }
+
+    private static boolean inClickBroadcast(String menuClass) {
+        boolean fromMenu = false;
+        for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
+            String owner = frame.getClassName();
+            if (menuClass.equals(owner)) fromMenu = true;
+            else if (fromMenu) {
+                if (!owner.startsWith("net.minecraft.")) return false;
+                if (owner.endsWith(".ServerboundContainerClickPacket") || owner.endsWith(".PacketPlayInWindowClick")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static Class<?> songType() {
@@ -258,11 +283,18 @@ final class JukeboxAccess {
         return empty(item) ? null : item;
     }
 
+    Object jukeboxIdentity(Jukebox box) {
+        if (jukeboxHandle != null) return ServerTasks.call(jukeboxHandle, box);
+        return liveRecordPlayer == null ? null : recordPlayer(box);
+    }
+
     Object recordIdentity(Jukebox box, ItemStack record) {
         if (record == null) return null;
         if (inventory != null) return stackIdentity(record);
-        if (jukeboxItem != null) return ServerTasks.call(jukeboxItem, ServerTasks.call(jukeboxHandle, box));
-        return liveRecordPlayer == null ? null : ServerTasks.call(nativeGet, recordPlayer(box));
+        Object player = jukeboxIdentity(box);
+        if (player == null) return null;
+        if (jukeboxItem != null) return ServerTasks.call(jukeboxItem, player);
+        return nativeGet == null ? null : ServerTasks.call(nativeGet, player);
     }
 
     void start(Jukebox box) {

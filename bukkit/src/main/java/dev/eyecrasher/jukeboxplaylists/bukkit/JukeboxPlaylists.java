@@ -12,10 +12,9 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 import java.util.logging.Level;
-import java.util.stream.Collectors;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
@@ -35,6 +34,7 @@ import org.bukkit.event.block.BlockPhysicsEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryInteractEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
@@ -53,6 +53,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     private final Map<UUID, Map<Long, TrackedChunk>> worlds = new ConcurrentHashMap<>();
+    private final Map<UUID, Runnable> deposits = new ConcurrentHashMap<>();
     private ServerTasks tasks;
     private JukeboxAccess access;
     private PlaylistPositions positions;
@@ -88,8 +89,12 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        deposits.clear();
         for (Map<Long, TrackedChunk> chunks : worlds.values()) {
-            for (TrackedChunk chunk : chunks.values()) chunk.cancel();
+            for (TrackedChunk chunk : chunks.values()) {
+                chunk.beforeSave();
+                chunk.cancel();
+            }
         }
         worlds.clear();
         savePositions();
@@ -104,16 +109,27 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         Map<Long, TrackedChunk> chunks = worlds.get(chunk.getWorld().getUID());
         if (chunks == null) return;
         TrackedChunk tracking = chunks.remove(chunkKey(chunk));
-        if (tracking != null) tracking.cancel();
+        if (tracking != null) {
+            tracking.refresh(false);
+            tracking.cancel();
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
-    public void worldSaved(WorldSaveEvent event) { savePositions(); }
+    public void worldSaved(WorldSaveEvent event) {
+        Map<Long, TrackedChunk> chunks = worlds.get(event.getWorld().getUID());
+        if (chunks != null) for (TrackedChunk chunk : chunks.values()) chunk.beforeSave();
+        savePositions();
+    }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void worldUnloaded(WorldUnloadEvent event) {
         Map<Long, TrackedChunk> chunks = worlds.remove(event.getWorld().getUID());
-        if (chunks != null) for (TrackedChunk chunk : chunks.values()) chunk.cancel();
+        if (chunks == null) return;
+        for (TrackedChunk chunk : chunks.values()) {
+            chunk.beforeSave();
+            chunk.cancel();
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -150,6 +166,20 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         if (holder instanceof Chest) scheduleDiscovery(((Chest) holder).getBlock());
     }
 
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void beforeClick(InventoryClickEvent event) { finishDeposit(event.getWhoClicked().getUniqueId()); }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void beforeDrag(InventoryDragEvent event) { finishDeposit(event.getWhoClicked().getUniqueId()); }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void closed(InventoryCloseEvent event) { finishDeposit(event.getPlayer().getUniqueId()); }
+
+    private void finishDeposit(UUID player) {
+        Runnable finish = deposits.remove(player);
+        if (finish != null) finish.run();
+    }
+
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void clicked(InventoryClickEvent event) {
         if (lazo == null || !(event.getWhoClicked() instanceof Player)) return;
@@ -164,7 +194,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         int slot = event.getRawSlot();
         int size = chest.getSize();
         if (action == InventoryAction.NOTHING) return;
-        forgetRemovedRecordings(event, chest, location);
+        reconcileRecordings(chest, location);
         boolean shift = action == InventoryAction.MOVE_TO_OTHER_INVENTORY;
         if (slot < 0 || (shift ? slot < size || slot >= view.countSlots() : slot >= size)) return;
 
@@ -190,38 +220,61 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                     && action != InventoryAction.PLACE_SOME && action != InventoryAction.SWAP_WITH_CURSOR) return;
         }
         ItemStack incoming = source.get();
-        List<ItemStack> sources = (bundle.isEmpty() ? Collections.singletonList(incoming) : bundle).stream()
-                .filter(access::isRecording).map(ItemStack::clone).collect(Collectors.toList());
-        if (sources.isEmpty()) return;
+        if (bundle.isEmpty() ? !access.isRecording(incoming) : bundle.stream().noneMatch(access::isRecording)) return;
         Playback playback = playbackFor(chest, location);
         if (playback == null) return;
+        UUID depositor = player.getUniqueId();
+        if (swap || action == InventoryAction.SWAP_WITH_CURSOR) {
+            RecordingApprovals.Stack original = new RecordingApprovals.Stack(access, incoming);
+            if (original.handle == null) return;
+            RecordingApprovals.Stack previous = new RecordingApprovals.Stack(access, chest.getItem(slot));
+            Runnable confirm = () -> {
+                ItemStack actual = chest.getItem(slot);
+                if (original.matches(access, actual) && !previous.matches(access, actual)
+                        && original.handle != access.stackIdentity(source.get())) {
+                    playback.recordings.store(slot, actual, depositor);
+                }
+            };
+            observeDeposit(event, player, location, playback, confirm, confirm);
+            return;
+        }
+
         Map<Integer, RecordingApprovals.Stack> before = new HashMap<>();
         if (shift) shiftSlots(chest, incoming, before);
         else before.put(slot, new RecordingApprovals.Stack(access, chest.getItem(slot)));
+        if (before.isEmpty()) return;
         ItemStack original = incoming.clone();
-        observeDeposit(event, player, chest, location, playback.recordings, before,
-                actual -> sources.stream().anyMatch(actual::isSimilar), () -> !original.equals(source.get()),
-                swap || action == InventoryAction.SWAP_WITH_CURSOR);
+        ToIntFunction<ItemStack> consumed;
+        if (bundle.isEmpty()) {
+            consumed = actual -> original.isSimilar(actual) ? consumedAmount(original, source.get()) : 0;
+        } else {
+            List<ItemStack> contents = bundle;
+            Object handle = access.stackIdentity(incoming);
+            consumed = actual -> {
+                ItemStack remainder = source.get();
+                return handle != null && handle == access.stackIdentity(remainder) && access.isRecording(actual)
+                        ? bundleAmount(contents, actual) - bundleAmount(access.bundleContents(remainder), actual) : 0;
+            };
+        }
+        observeDeposit(event, player, location, playback,
+                () -> confirmTransfer(view, before, consumed, playback.recordings, depositor), null);
     }
 
-    private void forgetRemovedRecordings(InventoryClickEvent event, Inventory chest, Location location) {
-        int slot = event.getRawSlot();
-        InventoryAction action = event.getAction();
-        if (action == InventoryAction.COLLECT_TO_CURSOR && access.isRecording(event.getCursor())) {
-            Playback playback = playback(location.getBlock().getRelative(BlockFace.DOWN));
-            if (playback != null) {
-                for (int i = 0; i < chest.getSize(); i++) {
-                    if (event.getCursor().isSimilar(chest.getItem(i))) playback.recordings.forget(i);
-                }
-            }
-        } else if (slot >= 0 && slot < chest.getSize()
-                && (action == InventoryAction.DROP_ONE_SLOT || action == InventoryAction.DROP_ALL_SLOT
-                || action == InventoryAction.PICKUP_ALL || action == InventoryAction.PICKUP_HALF
-                || action == InventoryAction.PICKUP_ONE || action == InventoryAction.PICKUP_SOME)
-                && access.isRecording(event.getCurrentItem())) {
-            Playback playback = playback(location.getBlock().getRelative(BlockFace.DOWN));
-            if (playback != null) playback.recordings.forget(slot);
+    private void reconcileRecordings(Inventory chest, Location location) {
+        Block top = location.getBlock();
+        Playback playback = playback(top.getRelative(BlockFace.DOWN));
+        if (playback != null && !playback.recordings.isEmpty() && isLiveChest(chest, top)) {
+            playback.recordings.update(chest);
         }
+    }
+
+    private static int consumedAmount(ItemStack original, ItemStack remainder) {
+        return JukeboxAccess.empty(remainder) || original.isSimilar(remainder)
+                ? original.getAmount() - amount(remainder) : 0;
+    }
+
+    private static int bundleAmount(List<ItemStack> contents, ItemStack item) {
+        return contents.stream().filter(item::isSimilar).mapToInt(ItemStack::getAmount).sum();
     }
 
     private void shiftSlots(Inventory chest, ItemStack incoming, Map<Integer, RecordingApprovals.Stack> slots) {
@@ -251,38 +304,70 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         if (!stillOpen(player, view)) return;
         Inventory chest = view.getTopInventory();
         if (invalidateDoubleChest(chest)) return;
+        Location location = chest.getLocation();
+        if (location == null || !tasks.owns(location)) return;
+        reconcileRecordings(chest, location);
         ItemStack source = event.getOldCursor();
         if (!access.isRecording(source)) return;
-        Location location = chest.getLocation();
+        Map<Integer, ItemStack> expected = event.getNewItems();
+        if (expected.keySet().stream().noneMatch(slot -> slot >= 0 && slot < chest.getSize())) return;
         Playback playback = playbackFor(chest, location);
         if (playback == null) return;
         Map<Integer, RecordingApprovals.Stack> before = new HashMap<>();
-        for (Map.Entry<Integer, ItemStack> change : event.getNewItems().entrySet()) {
-            int slot = change.getKey();
-            if (slot >= 0 && slot < chest.getSize() && source.isSimilar(change.getValue())) {
-                before.put(slot, new RecordingApprovals.Stack(access, chest.getItem(slot)));
-            }
+        for (int slot : expected.keySet()) {
+            if (slot < 0 || slot >= view.countSlots()) return;
+            before.put(slot, new RecordingApprovals.Stack(access, view.getItem(slot)));
         }
-        observeDeposit(event, player, chest, location, playback.recordings, before, source::isSimilar,
-                () -> amount(player.getItemOnCursor()) < source.getAmount(), false);
+        observeDeposit(event, player, location, playback, () -> {
+            if (expected.entrySet().stream().allMatch(change -> change.getValue().equals(view.getItem(change.getKey())))) {
+                confirmTransfer(view, before, actual -> source.isSimilar(actual)
+                        ? consumedAmount(source, player.getItemOnCursor()) : 0, playback.recordings, player.getUniqueId());
+            }
+        }, null);
     }
 
-    private void observeDeposit(InventoryInteractEvent event, Player player, Inventory chest, Location location,
-                                RecordingApprovals recordings, Map<Integer, RecordingApprovals.Stack> before,
-                                Predicate<ItemStack> incoming, BooleanSupplier transferred, boolean swap) {
-        if (before.isEmpty()) return;
-        recordings.update(chest);
+    private void confirmTransfer(InventoryView view, Map<Integer, RecordingApprovals.Stack> before,
+                                 ToIntFunction<ItemStack> consumed, RecordingApprovals recordings, UUID player) {
+        ItemStack moved = null;
+        int count = 0;
+        for (Map.Entry<Integer, RecordingApprovals.Stack> entry : before.entrySet()) {
+            ItemStack actual = view.getItem(entry.getKey());
+            RecordingApprovals.Stack previous = entry.getValue();
+            if (previous.matches(access, actual)) continue;
+            int added = amount(actual) - amount(previous.item);
+            if (added <= 0 || previous.item != null && !previous.item.isSimilar(actual)
+                    || moved != null && !moved.isSimilar(actual)) return;
+            moved = actual;
+            count += added;
+        }
+        if (moved == null || count != consumed.applyAsInt(moved)) return;
+        Inventory chest = view.getTopInventory();
+        before.forEach((slot, previous) -> {
+            if (slot < chest.getSize()) recordings.deposited(slot, previous, chest.getItem(slot), player);
+        });
+    }
+
+    private void observeDeposit(InventoryInteractEvent event, Player player, Location location, Playback playback,
+                                Runnable commit, Runnable confirmSwap) {
         InventoryView view = event.getView();
-        Runnable remove = access.observeSlotChanges(view, slot -> {
-            RecordingApprovals.Stack previous = before.get(slot);
-            if (previous == null || event.isCancelled() || !stillOpen(player, view) || !transferred.getAsBoolean()) return;
-            ItemStack committed = chest.getItem(slot);
-            if (!JukeboxAccess.empty(committed) && incoming.test(committed)) {
-                recordings.deposited(slot, previous, committed, player.getUniqueId(), swap);
-                before.remove(slot);
+        UUID depositor = player.getUniqueId();
+        BooleanSupplier valid = () -> !event.isCancelled() && stillOpen(player, view) && tasks.owns(location)
+                && playback(location.getBlock().getRelative(BlockFace.DOWN)) == playback;
+        Runnable finish = () -> {
+            if (confirmSwap != null && valid.getAsBoolean()) confirmSwap.run();
+        };
+        Runnable remove = access.observeSlotChanges(view, () -> {
+            if (deposits.remove(depositor, finish) && valid.getAsBoolean()) commit.run();
+        });
+        if (remove == null && confirmSwap == null) return;
+        deposits.put(depositor, finish);
+        tasks.region(location.getWorld(), location.getBlockX() >> 4, location.getBlockZ() >> 4, () -> {
+            try {
+                if (deposits.remove(depositor, finish)) finish.run();
+            } finally {
+                if (remove != null) remove.run();
             }
         });
-        if (remove != null) tasks.region(location.getWorld(), location.getBlockX() >> 4, location.getBlockZ() >> 4, remove);
     }
 
     private boolean stillOpen(Player player, InventoryView view) {
@@ -299,12 +384,14 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     private Playback playbackFor(Inventory chest, Location location) {
         if (location == null || !tasks.owns(location)) return null;
         Block top = location.getBlock();
-        if (!access.isSingleChest(top)) return null;
         Block box = top.getRelative(BlockFace.DOWN);
-        if (box.getType() != Material.JUKEBOX) return null;
-        BlockState state = access.state(top);
-        if (!(state instanceof Chest) || !chest.equals(((Chest) state).getBlockInventory())) return null;
+        if (box.getType() != Material.JUKEBOX || !isLiveChest(chest, top)) return null;
         return track(box.getChunk(), box);
+    }
+
+    private boolean isLiveChest(Inventory chest, Block top) {
+        Chest state = access.singleChest(top);
+        return state != null && chest.equals(state.getBlockInventory());
     }
 
     private boolean invalidateDoubleChest(Inventory inventory) {
@@ -369,9 +456,26 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
     }
 
     private Playback track(Chunk chunk, Block block) {
+        Jukebox box = liveJukebox(block);
+        if (box == null) return null;
         Map<Long, TrackedChunk> chunks = worlds.computeIfAbsent(chunk.getWorld().getUID(), ignored -> new ConcurrentHashMap<>());
         TrackedChunk tracked = chunks.computeIfAbsent(chunkKey(chunk), ignored -> new TrackedChunk(chunk, chunks));
-        return tracked.boxes.computeIfAbsent(block, ignored -> new Playback(chunk, block));
+        return tracked.boxes.compute(block, (ignored, previous) -> livePlayback(chunk, box, previous));
+    }
+
+    private Jukebox liveJukebox(Block block) {
+        if (block.getType() != Material.JUKEBOX) return null;
+        BlockState state = access.state(block);
+        return state instanceof Jukebox ? (Jukebox) state : null;
+    }
+
+    private Playback livePlayback(Chunk chunk, Jukebox box, Playback previous) {
+        Object identity = access.jukeboxIdentity(box);
+        if (previous != null) {
+            if (identity == null || previous.boxIdentity == null || identity == previous.boxIdentity) return previous;
+            positions.clear(chunk, box.getBlock());
+        }
+        return new Playback(chunk, box, identity);
     }
 
     private void savePositions() {
@@ -401,29 +505,43 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
 
         void cancel() { cancel.run(); }
 
+        void beforeSave() {
+            Location location = new Location(chunk.getWorld(), chunk.getX() << 4, 0, chunk.getZ() << 4);
+            if (tasks.owns(location) && chunk.isLoaded()) refresh(false);
+        }
+
         void tick() {
             if (chunk.isLoaded()) {
-                Iterator<Map.Entry<Block, Playback>> iterator = boxes.entrySet().iterator();
-                while (iterator.hasNext()) {
-                    Map.Entry<Block, Playback> entry = iterator.next();
-                    Block block = entry.getKey();
-                    if (block.getType() != Material.JUKEBOX) {
-                        positions.clear(chunk, block);
-                        iterator.remove();
-                        continue;
-                    }
-                    entry.getValue().tick(chunk, block);
-                }
+                refresh(true);
                 if (!boxes.isEmpty()) return;
             }
             chunks.remove(chunkKey(chunk), this);
             cancel();
+        }
+
+        void refresh(boolean tick) {
+            Iterator<Map.Entry<Block, Playback>> iterator = boxes.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<Block, Playback> entry = iterator.next();
+                Block block = entry.getKey();
+                Jukebox box = liveJukebox(block);
+                if (box == null) {
+                    positions.clear(chunk, block);
+                    iterator.remove();
+                    continue;
+                }
+                Playback playback = livePlayback(chunk, box, entry.getValue());
+                entry.setValue(playback);
+                if (tick) playback.tick(chunk, box);
+                else playback.reconcileRecord(chunk, box, false);
+            }
         }
     }
 
     private final class Playback {
         private static final int REPEATING = -2;
         private final RecordingApprovals recordings = new RecordingApprovals(access);
+        private final Object boxIdentity;
         private int position;
         private ItemStack previous;
         private Object previousStack;
@@ -434,19 +552,18 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         private Object recordingEntryStack;
         private long elapsed;
 
-        Playback(Chunk chunk, Block block) {
+        Playback(Chunk chunk, Jukebox box, Object identity) {
+            boxIdentity = identity;
+            Block block = box.getBlock();
             position = positions.load(chunk, block);
-            BlockState snapshot = access.state(block);
-            if (snapshot instanceof Jukebox) {
-                Jukebox box = (Jukebox) snapshot;
-                ItemStack current = access.record(box);
-                reset(current, access.recordIdentity(box, current));
-            }
+            ItemStack current = access.record(box);
+            reset(current, access.recordIdentity(box, current));
             boolean recording = access.isRecording(previous);
             advancePending = positions.restorePending(chunk, block, recording && previousStack == null ? null : previous);
         }
 
-        void tick(Chunk chunk, Block block) {
+        void tick(Chunk chunk, Jukebox box) {
+            Block block = box.getBlock();
             if (block.getY() + 1 >= block.getWorld().getMaxHeight()) return;
             Block chest = block.getRelative(BlockFace.UP);
             boolean single = access.isSingleChest(chest);
@@ -459,17 +576,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                 if (chestState instanceof Chest) recordings.update(((Chest) chestState).getBlockInventory());
             }
             boolean reattached = !attached;
-            BlockState snapshot = access.state(block);
-            if (!(snapshot instanceof Jukebox)) return;
-            Jukebox box = (Jukebox) snapshot;
-            ItemStack current = access.record(box);
-            Object stack = access.recordIdentity(box, current);
-            boolean changed = previousStack != stack || !Objects.equals(previous, current);
-            if (changed || reattached) reset(current, stack);
-            if (changed || current == null) {
-                setPending(chunk, block, null);
-                if (position == REPEATING) setPosition(chunk, block, -1);
-            }
+            ItemStack current = reconcileRecord(chunk, box, reattached);
             if (!single) return;
             attached = true;
             if (current == null) {
@@ -482,7 +589,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                 Object entry = lazo.activeEntry(block, current);
                 if (entry != null) {
                     if (rememberEntry(entry)) recordingPlayer = null;
-                    if (recordingEntryStack == stack) setPending(chunk, block, null);
+                    if (recordingEntryStack == previousStack) setPending(chunk, block, null);
                     elapsed = 0;
                 } else {
                     if (elapsed == 0 && finished(block)) setPending(chunk, block, current);
@@ -499,6 +606,19 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                     advance(chunk, box, chest, current);
                 }
             }
+        }
+
+        private ItemStack reconcileRecord(Chunk chunk, Jukebox box, boolean reattached) {
+            ItemStack current = access.record(box);
+            Object stack = access.recordIdentity(box, current);
+            boolean changed = previousStack != stack || !Objects.equals(previous, current);
+            if (changed || reattached) reset(current, stack);
+            if (changed || current == null) {
+                Block block = box.getBlock();
+                setPending(chunk, block, null);
+                if (position == REPEATING) setPosition(chunk, block, -1);
+            }
+            return current;
         }
 
         private void reset(ItemStack record, Object stack) {

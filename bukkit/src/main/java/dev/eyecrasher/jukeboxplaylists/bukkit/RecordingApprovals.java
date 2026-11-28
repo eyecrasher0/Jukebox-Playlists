@@ -18,16 +18,11 @@ final class RecordingApprovals {
         approved.entrySet().removeIf(entry -> !entry.getValue().stack.matches(access, chest.getItem(entry.getKey())));
     }
 
-    void forget(int slot) {
-        approved.remove(slot);
-    }
-
-    void deposited(int slot, Stack before, ItemStack actual, UUID player, boolean swap) {
-        if (JukeboxAccess.empty(actual) || before.matches(access, actual)) return;
+    void deposited(int slot, Stack before, ItemStack actual, UUID player) {
+        if (amount(actual) <= amount(before.item)) return;
         Approval previous = approved.get(slot);
-        if (swap && before.handle != access.stackIdentity(actual)
-                || amount(actual) > amount(before.item) && (before.item == null
-                || before.item.isSimilar(actual) && previous != null && player.equals(previous.player))) {
+        if (before.item == null || previous != null && player.equals(previous.player)
+                && previous.stack.handle == before.handle && Objects.equals(previous.stack.item, before.item)) {
             store(slot, actual, player);
         }
     }

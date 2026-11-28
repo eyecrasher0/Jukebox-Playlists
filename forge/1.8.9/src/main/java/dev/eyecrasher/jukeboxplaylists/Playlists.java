@@ -13,6 +13,7 @@ import net.minecraft.inventory.IInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemRecord;
 import net.minecraft.item.ItemStack;
+import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.tileentity.TileEntityLockable;
 import net.minecraft.util.BlockPos;
@@ -67,38 +68,43 @@ final class Playlists {
 
         Playback(TileEntityJukebox box) {
             previous = box.getRecord();
-            pending = box.getTileData().getBoolean(ADVANCE_PENDING);
+            pending = box.getTileData().hasKey(ADVANCE_PENDING);
+            if (pending && !matchesPending(box, previous)) setPending(box, null);
             resume = !pending && box.getTileData().hasKey(CURSOR);
         }
 
         void tick(WorldServer world, TileEntityJukebox box, IInventory chest, boolean canAdvance) {
             ItemStack current = box.getRecord();
-            if (current != previous) {
+            if (current != previous || pending && !matchesPending(box, current)) {
                 previous = current;
                 elapsed = 0;
                 resume = false;
-                setPending(box, false);
+                setPending(box, null);
             }
             if (empty(current)) {
-                setPending(box, false);
+                setPending(box, null);
                 if (canAdvance) advance(world, box, chest, null);
             } else if (current.getItem() instanceof ItemRecord) {
                 if (resume) sound(world, box, current);
                 long length = length((ItemRecord) current.getItem());
                 if (pending || (++elapsed >= length + 20 && length > 0)) {
-                    setPending(box, !canAdvance);
+                    setPending(box, canAdvance ? null : current);
                     if (canAdvance) advance(world, box, chest, current);
                 }
             } else {
-                setPending(box, false);
+                setPending(box, null);
             }
             resume = false;
         }
 
-        private void setPending(TileEntityJukebox box, boolean value) {
-            if (pending == value) return;
-            pending = value;
-            if (value) box.getTileData().setBoolean(ADVANCE_PENDING, true);
+        private static boolean matchesPending(TileEntityJukebox box, ItemStack record) {
+            return !empty(record) && record.writeToNBT(new NBTTagCompound()).equals(box.getTileData().getTag(ADVANCE_PENDING));
+        }
+
+        private void setPending(TileEntityJukebox box, ItemStack record) {
+            if (pending == (record != null)) return;
+            pending = record != null;
+            if (pending) box.getTileData().setTag(ADVANCE_PENDING, record.writeToNBT(new NBTTagCompound()).copy());
             else box.getTileData().removeTag(ADVANCE_PENDING);
             box.markDirty();
         }
