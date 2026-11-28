@@ -14,10 +14,21 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.world.WorldServer;
+import net.minecraft.world.chunk.Chunk;
 
 final class Playlists {
     private final Map<TileEntityJukebox, Playback> active = new WeakHashMap<>();
     private final List<TileEntityJukebox> ticking = new ArrayList<>();
+
+    void load(Chunk chunk) {
+        if (!(chunk.worldObj instanceof WorldServer)) return;
+        WorldServer world = (WorldServer) chunk.worldObj;
+        for (Object tile : chunk.chunkTileEntityMap.values()) {
+            if (!(tile instanceof TileEntityJukebox)) continue;
+            TileEntityJukebox box = (TileEntityJukebox) tile;
+            if (!empty(box.func_145856_a())) active.computeIfAbsent(box, key -> new Playback(world, key, true));
+        }
+    }
 
     void tick(WorldServer world) {
         // Changes to a jukebox can notify neighbors, which may change the world's tile list.
@@ -30,10 +41,11 @@ final class Playlists {
                 if (world.getBlock(box.xCoord, box.yCoord, box.zCoord) != Blocks.jukebox) continue;
                 IInventory chest = chest(world, box.xCoord, box.yCoord + 1, box.zCoord);
                 if (chest == null) {
-                    active.remove(box);
+                    Playback playback = active.get(box);
+                    if (playback != null && !playback.resume) active.remove(box);
                     continue;
                 }
-                active.computeIfAbsent(box, ignored -> new Playback(world, box)).tick(world, box, chest);
+                active.computeIfAbsent(box, key -> new Playback(world, key, false)).tick(world, box, chest);
             }
         } finally {
             ticking.clear();
@@ -62,26 +74,27 @@ final class Playlists {
 
         private int position;
 
-        Playback(WorldServer world, TileEntityJukebox box) {
+        Playback(WorldServer world, TileEntityJukebox box, boolean loaded) {
             position = PlaylistPositions.get(world, box);
-            if (empty(box.func_145856_a())) setPosition(world, box, -1);
-            resume = position != -1;
+            previous = box.func_145856_a();
+            resume = loaded && !empty(previous);
         }
 
         void tick(WorldServer world, TileEntityJukebox box, IInventory chest) {
             ItemStack current = box.func_145856_a();
-            if (!empty(current) && current != previous) {
+            if (current != previous) {
                 previous = current;
                 elapsed = 0;
-                if (resume && current.getItem() instanceof ItemRecord) sound(world, box, current);
+                resume = false;
             }
-            resume = false;
             if (empty(current)) {
                 advance(world, box, chest, null);
             } else if (current.getItem() instanceof ItemRecord) {
+                if (resume) sound(world, box, current);
                 long length = length((ItemRecord) current.getItem());
                 if (++elapsed >= length + 20 && length > 0) advance(world, box, chest, current);
             }
+            resume = false;
         }
 
         private void advance(WorldServer world, TileEntityJukebox box, IInventory chest, ItemStack current) {

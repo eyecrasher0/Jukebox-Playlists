@@ -30,7 +30,7 @@ public final class LegacySoundLengths {
 
     public long ticks(String soundId) {
         try {
-            double seconds = event(soundId, 1.0, new HashSet<>());
+            double seconds = event(identifier(soundId, "minecraft"), 1.0, new HashSet<>());
             double ticks = Math.ceil(seconds * 20.0);
             return Double.isFinite(ticks) && ticks > 0 && ticks < Long.MAX_VALUE - 20 ? (long) ticks : -1;
         } catch (IOException | RuntimeException exception) {
@@ -39,7 +39,6 @@ public final class LegacySoundLengths {
     }
 
     private double event(String id, double pitch, Set<String> visiting) throws IOException {
-        id = identifier(id);
         if (visiting.size() >= 32 || !visiting.add(id)) return -1;
         try {
             int colon = id.indexOf(':');
@@ -69,8 +68,9 @@ public final class LegacySoundLengths {
                     if (entry.has("pitch")) entryPitch = entry.get("pitch").getAsDouble();
                 }
                 if (!Double.isFinite(entryPitch) || entryPitch <= 0) return -1;
-                double seconds = reference ? event(name, pitch * entryPitch, visiting)
-                    : file(identifier(name)) / Math.max(0.5, Math.min(2.0, pitch * entryPitch));
+                String resource = identifier(name, namespace);
+                double seconds = reference ? event(resource, pitch * entryPitch, visiting)
+                    : file(resource) / Math.max(0.5, Math.min(2.0, pitch * entryPitch));
                 // Random variants cannot be predicted by the server. Wait for
                 // the longest one, and never guess if any variant is unknown.
                 if (!(seconds > 0)) return -1;
@@ -118,8 +118,8 @@ public final class LegacySoundLengths {
         return seconds;
     }
 
-    private static String identifier(String id) {
-        if (id.indexOf(':') < 0) id = "minecraft:" + id;
+    private static String identifier(String id, String namespace) {
+        if (id.indexOf(':') < 0) id = namespace + ':' + id;
         if (!id.matches("[a-z0-9_.-]+:[a-z0-9_./-]+") || id.contains("..")) {
             throw new IllegalArgumentException("Invalid sound identifier");
         }

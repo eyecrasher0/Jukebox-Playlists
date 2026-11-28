@@ -40,6 +40,9 @@ final class JukeboxAccess {
     private final Method songFromStack;
     private final Method copyForSong;
     private final Method worldHandle;
+    private final Method paperConfig;
+    private final Field hopperConfig;
+    private final Field disableHopperMoveEvent;
     private final Method registryAccess;
     private final Field stackHandle;
     private final Method menuHandle;
@@ -76,6 +79,14 @@ final class JukeboxAccess {
         }
         bundleItems = bundleItemsMethod();
         String craft = Bukkit.getServer().getClass().getPackage().getName();
+        worldHandle = Class.forName(craft + ".CraftWorld").getMethod("getHandle");
+        paperConfig = ServerTasks.optional(worldHandle.getReturnType(), "paperConfig");
+        if (paperConfig == null) {
+            hopperConfig = disableHopperMoveEvent = null;
+        } else {
+            hopperConfig = paperConfig.getReturnType().getField("hopper");
+            disableHopperMoveEvent = hopperConfig.getType().getField("disableMoveEvent");
+        }
         Class<?> craftStack = Class.forName(craft + ".inventory.CraftItemStack");
         stackHandle = craftStack.getDeclaredField("handle");
         stackHandle.setAccessible(true);
@@ -98,7 +109,7 @@ final class JukeboxAccess {
         }
         Class<?> songs = songType();
         if (songs == null) {
-            songFromStack = copyForSong = worldHandle = registryAccess = null;
+            songFromStack = copyForSong = registryAccess = null;
         } else {
             copyForSong = craftStack.getMethod("asNMSCopy", ItemStack.class);
             Class<?> nativeStack = copyForSong.getReturnType();
@@ -109,9 +120,8 @@ final class JukeboxAccess {
                             && method.getParameterTypes()[method.getParameterCount() - 1] == nativeStack)
                     .findFirst().orElseThrow(() -> new NoSuchMethodException("JukeboxSong.fromStack"));
             if (songFromStack.getParameterCount() == 1) {
-                worldHandle = registryAccess = null;
+                registryAccess = null;
             } else {
-                worldHandle = Class.forName(craft + ".CraftWorld").getMethod("getHandle");
                 Class<?> lookup = songFromStack.getParameterTypes()[0];
                 registryAccess = Arrays.stream(worldHandle.getReturnType().getMethods())
                         .filter(method -> !Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0
@@ -186,6 +196,16 @@ final class JukeboxAccess {
     }
 
     boolean nativeTiming() { return startPlaying != null; }
+
+    boolean observesHopperMoves(World world) {
+        if (paperConfig == null) return true;
+        Object config = ServerTasks.call(paperConfig, ServerTasks.call(worldHandle, world));
+        try {
+            return !disableHopperMoveEvent.getBoolean(hopperConfig.get(config));
+        } catch (IllegalAccessException failure) {
+            throw new IllegalStateException("Cannot read the hopper move event setting", failure);
+        }
+    }
 
     Object stackIdentity(ItemStack item) {
         if (!stackHandle.getDeclaringClass().isInstance(item)) return null;

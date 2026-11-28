@@ -6,7 +6,7 @@ import org.spongepowered.asm.mixin.*;
 public abstract class RecordSoundMixin implements LegacyRecordSound {
     @Shadow(remap = false) @Final private java.util.function.Supplier<net.minecraft.sounds.SoundEvent> soundSupplier;
     @Override public String playlist$soundId() {
-        Object id = net.minecraftforge.registries.ForgeRegistries.SOUND_EVENTS.getKey(soundSupplier.get());
-        return id == null ? null : id.toString();
+        net.minecraft.sounds.SoundEvent sound = soundSupplier.get();
+        return sound == null ? null : sound.getLocation().toString();
     }
 }

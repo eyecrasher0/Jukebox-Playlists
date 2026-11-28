@@ -15,7 +15,36 @@ final class RecordingApprovals {
     RecordingApprovals(JukeboxAccess access) { this.access = access; }
 
     void update(Inventory chest) {
-        approved.entrySet().removeIf(entry -> !entry.getValue().stack.matches(access, chest.getItem(entry.getKey())));
+        if (approved.isEmpty()) return;
+        boolean observesMoves = access.observesHopperMoves(chest.getLocation().getWorld());
+        approved.entrySet().removeIf(entry -> {
+            Stack stack = entry.getValue().stack;
+            return (!observesMoves && stack.item.getMaxStackSize() > 1)
+                    || !stack.matches(access, chest.getItem(entry.getKey()));
+        });
+    }
+
+    void movingOut(Inventory chest, ItemStack item) {
+        update(chest);
+        Object handle = access.stackIdentity(item);
+        if (handle != null) approved.values().removeIf(approval -> approval.stack.handle == handle);
+    }
+
+    void movingIn(Inventory chest, ItemStack item) {
+        update(chest);
+        int remaining = amount(item);
+        for (int slot = 0; slot < chest.getSize() && remaining > 0 && !approved.isEmpty(); slot++) {
+            int space = spaceFor(chest, item, chest.getItem(slot));
+            if (space > 0) {
+                approved.remove(slot);
+                remaining -= space;
+            }
+        }
+    }
+
+    static int spaceFor(Inventory inventory, ItemStack incoming, ItemStack current) {
+        if (!JukeboxAccess.empty(current) && !incoming.isSimilar(current)) return 0;
+        return Math.min(inventory.getMaxStackSize(), incoming.getMaxStackSize()) - amount(current);
     }
 
     void deposited(int slot, Stack before, ItemStack actual, UUID player) {

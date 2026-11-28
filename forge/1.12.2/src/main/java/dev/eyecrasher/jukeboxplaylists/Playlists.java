@@ -14,6 +14,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemRecord;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.nbt.NBTTagList;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.tileentity.TileEntityLockable;
 import net.minecraft.util.math.BlockPos;
@@ -22,12 +23,40 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.SoundEvent;
 import java.lang.reflect.Field;
 import net.minecraft.world.WorldServer;
+import net.minecraft.world.chunk.Chunk;
 
 final class Playlists {
     private static final String CURSOR = "jukebox_playlists:position";
     private static final String ADVANCE_PENDING = "jukebox_playlists:advance_pending";
     private final Map<TileEntityJukebox, Playback> active = new WeakHashMap<>();
     private final List<TileEntityJukebox> ticking = new ArrayList<>();
+
+    void load(Chunk chunk) {
+        for (TileEntity tile : chunk.getTileEntityMap().values()) {
+            if (!(tile instanceof TileEntityJukebox)) continue;
+            TileEntityJukebox box = (TileEntityJukebox) tile;
+            if (!empty(box.getRecord()) || box.getTileData().hasKey(ADVANCE_PENDING)) {
+                active.computeIfAbsent(box, key -> new Playback(key, true));
+            }
+        }
+    }
+
+    void save(Chunk chunk, NBTTagCompound data) {
+        NBTTagList tiles = data.getCompoundTag("Level").getTagList("TileEntities", 10);
+        for (int i = 0; i < tiles.tagCount(); i++) {
+            NBTTagCompound tile = tiles.getCompoundTagAt(i);
+            NBTTagCompound forgeData = tile.getCompoundTag("ForgeData");
+            if (!forgeData.hasKey(ADVANCE_PENDING)) continue;
+            BlockPos pos = new BlockPos(tile.getInteger("x"), tile.getInteger("y"), tile.getInteger("z"));
+            TileEntity live = chunk.getTileEntityMap().get(pos);
+            Playback playback = active.get(live);
+            NBTTagCompound saved = forgeData.copy();
+            if (playback == null || !playback.pendingFor((TileEntityJukebox) live)) {
+                saved.removeTag(ADVANCE_PENDING);
+            }
+            tile.setTag("ForgeData", saved);
+        }
+    }
 
     void tick(WorldServer world) {
         // Changes to a jukebox can notify neighbors, which may change the world's tile list.
@@ -43,7 +72,7 @@ final class Playlists {
                 if (chest == null && !active.containsKey(box) && !box.getTileData().hasKey(ADVANCE_PENDING)) continue;
                 boolean canAdvance = chest != null
                         && (!(chest instanceof TileEntityLockable) || !((TileEntityLockable) chest).isLocked());
-                active.computeIfAbsent(box, ignored -> new Playback(box)).tick(world, box, chest, canAdvance);
+                active.computeIfAbsent(box, key -> new Playback(key, false)).tick(world, box, chest, canAdvance);
             }
         } finally {
             ticking.clear();
@@ -68,11 +97,11 @@ final class Playlists {
         private boolean resume;
         private boolean pending;
 
-        Playback(TileEntityJukebox box) {
+        Playback(TileEntityJukebox box, boolean loaded) {
             previous = box.getRecord();
             pending = box.getTileData().hasKey(ADVANCE_PENDING);
-            if (pending && !matchesPending(box, previous)) setPending(box, null);
-            resume = !pending && box.getTileData().hasKey(CURSOR);
+            if (pending && (!loaded || !matchesPending(box, previous))) setPending(box, null);
+            resume = loaded && !pending && !empty(previous);
         }
 
         void tick(WorldServer world, TileEntityJukebox box, IInventory chest, boolean canAdvance) {
@@ -87,7 +116,10 @@ final class Playlists {
                 setPending(box, null);
                 if (canAdvance) advance(world, box, chest, null);
             } else if (current.getItem() instanceof ItemRecord) {
-                if (resume) sound(world, box, current);
+                if (resume) {
+                    if (chest == null) return;
+                    sound(world, box, current);
+                }
                 long length = length((ItemRecord) current.getItem());
                 if (pending || (++elapsed >= length + 20 && length > 0)) {
                     setPending(box, canAdvance ? null : current);
@@ -97,6 +129,11 @@ final class Playlists {
                 setPending(box, null);
             }
             resume = false;
+        }
+
+        private boolean pendingFor(TileEntityJukebox box) {
+            ItemStack current = box.getRecord();
+            return pending && previous == current && matchesPending(box, current);
         }
 
         private static boolean matchesPending(TileEntityJukebox box, ItemStack record) {
