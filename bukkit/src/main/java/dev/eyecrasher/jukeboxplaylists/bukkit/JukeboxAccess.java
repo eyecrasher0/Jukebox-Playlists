@@ -6,10 +6,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.IntConsumer;
 import org.bukkit.Bukkit;
 import org.bukkit.Effect;
 import org.bukkit.Location;
@@ -42,8 +44,7 @@ final class JukeboxAccess {
     private final Method registryAccess;
     private final Field stackHandle;
     private final Method menuHandle;
-    private final Method humanHandle;
-    private final Method menuClick;
+    private final Field menuListeners;
     private final Method jukeboxHandle;
     private final Method jukeboxItem;
     private final Method blockData = ServerTasks.optional(Block.class, "getBlockData");
@@ -79,15 +80,9 @@ final class JukeboxAccess {
         Class<?> craftStack = Class.forName(craft + ".inventory.CraftItemStack");
         stackHandle = craftStack.getDeclaredField("handle");
         stackHandle.setAccessible(true);
-        if (itemData == null) {
-            menuHandle = humanHandle = menuClick = null;
-        } else {
-            menuHandle = ServerTasks.optional(Class.forName(craft + ".inventory.CraftInventoryView"), "getHandle");
-            humanHandle = Class.forName(craft + ".entity.CraftHumanEntity").getMethod("getHandle");
-            menuClick = menuHandle == null ? null : Arrays.stream(menuHandle.getReturnType().getMethods())
-                    .filter(method -> isMenuClick(method, humanHandle.getReturnType(), stackHandle.getType()))
-                    .findFirst().orElse(null);
-        }
+        menuHandle = itemData == null ? null
+                : ServerTasks.optional(Class.forName(craft + ".inventory.CraftInventoryView"), "getHandle");
+        menuListeners = menuHandle == null ? null : slotListeners(menuHandle.getReturnType(), stackHandle.getType());
         if (inventory == null && !craft.endsWith(".v1_7_R4")) {
             Class<?> craftJukebox = Class.forName(craft + ".block.CraftJukebox");
             Method handle = ServerTasks.optional(craftJukebox, "getBlockEntity");
@@ -193,23 +188,51 @@ final class JukeboxAccess {
         }
     }
 
-    private static boolean isMenuClick(Method method, Class<?> player, Class<?> stack) {
+    private static boolean isSlotChange(Method method, Class<?> menu, Class<?> stack) {
         Class<?>[] args = method.getParameterTypes();
-        return !Modifier.isStatic(method.getModifiers()) && args.length == 4
-                && args[0] == int.class && args[1] == int.class && args[2].isEnum() && args[3].isAssignableFrom(player)
-                && (method.getReturnType() == void.class || method.getReturnType() == stack);
+        return (args.length == 3 || args.length == 4) && args[0] == menu && args[1] == int.class && args[2] == stack;
     }
 
-    Runnable inventoryClick(InventoryView view, int slot, int button, String input) {
-        if (menuClick == null || !menuHandle.getDeclaringClass().isInstance(view)) return null;
-        Object menu = ServerTasks.call(menuHandle, view);
-        Object player = ServerTasks.call(humanHandle, view.getPlayer());
-        for (Object action : menuClick.getParameterTypes()[2].getEnumConstants()) {
-            if (((Enum<?>) action).name().equals(input)) {
-                return () -> ServerTasks.call(menuClick, menu, slot, button, action, player);
+    private static Field slotListeners(Class<?> menu, Class<?> stack) {
+        for (Field field : menu.getDeclaredFields()) {
+            Class<?> listener = listenerType(field);
+            if (listener != null && Arrays.stream(listener.getMethods()).anyMatch(method -> isSlotChange(method, menu, stack))) {
+                field.setAccessible(true);
+                return field;
             }
         }
         return null;
+    }
+
+    private static Class<?> listenerType(Field field) {
+        if (Modifier.isStatic(field.getModifiers()) || field.getType() != List.class
+                || !(field.getGenericType() instanceof ParameterizedType)) return null;
+        java.lang.reflect.Type type = ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+        return type instanceof Class<?> && ((Class<?>) type).isInterface() ? (Class<?>) type : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    Runnable observeSlotChanges(InventoryView view, IntConsumer changed) {
+        if (menuListeners == null || !menuHandle.getDeclaringClass().isInstance(view)) return null;
+        Object menu = ServerTasks.call(menuHandle, view);
+        try {
+            List<Object> listeners = (List<Object>) menuListeners.get(menu);
+            Class<?> type = listenerType(menuListeners);
+            Object listener = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> {
+                if (method.getDeclaringClass() == Object.class) {
+                    if ("equals".equals(method.getName())) return proxy == args[0];
+                    if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+                    return "Jukebox Playlists inventory listener";
+                }
+                if (isSlotChange(method, menuHandle.getReturnType(), stackHandle.getType())) changed.accept((Integer) args[1]);
+                return null;
+            });
+            // The public native registration also broadcasts immediately, before Bukkit applies the click.
+            listeners.add(listener);
+            return () -> listeners.remove(listener);
+        } catch (IllegalAccessException inaccessible) {
+            return null;
+        }
     }
 
     private static Class<?> songType() {

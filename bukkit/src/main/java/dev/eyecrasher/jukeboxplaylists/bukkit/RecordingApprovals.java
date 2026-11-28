@@ -1,7 +1,6 @@
 package dev.eyecrasher.jukeboxplaylists.bukkit;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -19,17 +18,8 @@ final class RecordingApprovals {
         approved.entrySet().removeIf(entry -> !entry.getValue().stack.matches(access, chest.getItem(entry.getKey())));
     }
 
-    void transfer(Inventory chest, int first, int end, List<ItemStack> sources, UUID player, boolean swap, Runnable move) {
-        update(chest);
-        Stack[] before = new Stack[end - first];
-        for (int slot = first; slot < end; slot++) before[slot - first] = new Stack(access, chest.getItem(slot));
-        move.run();
-        for (int slot = first; slot < end; slot++) {
-            ItemStack actual = chest.getItem(slot);
-            if (!JukeboxAccess.empty(actual) && sources.stream().anyMatch(actual::isSimilar)) {
-                deposited(slot, before[slot - first], actual, player, swap);
-            }
-        }
+    void forget(int slot) {
+        approved.remove(slot);
     }
 
     void deposited(int slot, Stack before, ItemStack actual, UUID player, boolean swap) {

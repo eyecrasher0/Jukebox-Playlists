@@ -20,4 +20,6 @@ Run `./gradlew build` in `bukkit/` or in the relevant loader and version directo
 
 Launch Fabric 1.16.5–1.20.4 with JDK 21 and provide JDK 17 for its compiler toolchain. Use JDK 8 for Forge 1.7.10, 1.8.9 and 1.12.2. For other loader builds, use the JDK specified by the toolchain in `build.gradle`.
 
+ForgeGradle 7 builds also need JDK 25 available to Gradle for Minecraft Mavenizer.
+
 [GPL-3.0-only](LICENSE)

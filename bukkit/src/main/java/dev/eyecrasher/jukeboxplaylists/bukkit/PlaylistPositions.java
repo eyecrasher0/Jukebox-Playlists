@@ -68,7 +68,7 @@ final class PlaylistPositions {
         }
     }
 
-    boolean restorePending(Chunk chunk, Block block, ItemStack current, boolean recording) {
+    boolean restorePending(Chunk chunk, Block block, ItemStack current) {
         String saved;
         if (container == null) {
             saved = legacy.getProperty(legacyKey(block, PENDING));
@@ -77,13 +77,10 @@ final class PlaylistPositions {
             Object positionKey = key(block, PENDING);
             if ((Boolean) ServerTasks.call(has, data, positionKey, string)) {
                 saved = (String) ServerTasks.call(get, data, positionKey, string);
-            } else {
-                saved = (Boolean) ServerTasks.call(has, data, positionKey, integer)
-                        && Integer.valueOf(1).equals(ServerTasks.call(get, data, positionKey, integer)) ? "1" : null;
-            }
+            } else saved = null;
         }
         if (saved == null) return false;
-        if (current != null && ("1".equals(saved) ? !recording : matchesRecord(saved, current))) return true;
+        if (current != null && matchesRecord(saved, current)) return true;
         pending(chunk, block, null);
         return false;
     }

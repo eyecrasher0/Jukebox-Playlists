@@ -11,6 +11,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 import org.bukkit.Bukkit;
@@ -33,6 +36,7 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.InventoryAction;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryInteractEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
@@ -146,7 +150,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         if (holder instanceof Chest) scheduleDiscovery(((Chest) holder).getBlock());
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void clicked(InventoryClickEvent event) {
         if (lazo == null || !(event.getWhoClicked() instanceof Player)) return;
         Player player = (Player) event.getWhoClicked();
@@ -159,52 +163,87 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         InventoryAction action = event.getAction();
         int slot = event.getRawSlot();
         int size = chest.getSize();
+        if (action == InventoryAction.NOTHING) return;
+        forgetRemovedRecordings(event, chest, location);
         boolean shift = action == InventoryAction.MOVE_TO_OTHER_INVENTORY;
         if (slot < 0 || (shift ? slot < size || slot >= view.countSlots() : slot >= size)) return;
 
-        String input;
-        int button = event.isRightClick() ? 1 : 0;
-        List<ItemStack> sources;
+        Supplier<ItemStack> source;
+        List<ItemStack> bundle = Collections.emptyList();
         boolean swap = action == InventoryAction.HOTBAR_SWAP || action == InventoryAction.HOTBAR_MOVE_AND_READD;
         if (shift) {
             if (!event.isShiftClick()) return;
-            input = "QUICK_MOVE";
-            sources = Collections.singletonList(event.getCurrentItem());
+            source = event::getCurrentItem;
         } else if (swap) {
-            input = "SWAP";
-            button = event.getHotbarButton();
-            if (button >= 0 && button < 9) sources = Collections.singletonList(player.getInventory().getItem(button));
+            int button = event.getHotbarButton();
+            if (button >= 0 && button < 9) source = () -> player.getInventory().getItem(button);
             else if ("SWAP_OFFHAND".equals(event.getClick().name())) {
-                button = 40;
-                sources = Collections.singletonList(player.getInventory().getItemInOffHand());
+                source = () -> player.getInventory().getItemInOffHand();
             } else return;
         } else {
             if (!"LEFT".equals(event.getClick().name()) && !"RIGHT".equals(event.getClick().name())) return;
-            input = "PICKUP";
-            ItemStack cursor = player.getItemOnCursor();
+            source = player::getItemOnCursor;
             boolean fromBundle = "PLACE_FROM_BUNDLE".equals(action.name())
                     || action == InventoryAction.PLACE_ONE && event.isRightClick();
-            List<ItemStack> bundle = fromBundle && JukeboxAccess.empty(event.getCurrentItem())
-                    ? access.bundleContents(cursor) : Collections.emptyList();
-            if (!bundle.isEmpty()) sources = bundle;
-            else if (action == InventoryAction.PLACE_ALL || action == InventoryAction.PLACE_ONE
-                    || action == InventoryAction.PLACE_SOME || action == InventoryAction.SWAP_WITH_CURSOR) {
-                sources = Collections.singletonList(cursor);
-            } else return;
+            if (fromBundle && JukeboxAccess.empty(event.getCurrentItem())) bundle = access.bundleContents(source.get());
+            if (bundle.isEmpty() && action != InventoryAction.PLACE_ALL && action != InventoryAction.PLACE_ONE
+                    && action != InventoryAction.PLACE_SOME && action != InventoryAction.SWAP_WITH_CURSOR) return;
         }
-        sources = sources.stream().filter(access::isRecording).map(ItemStack::clone).collect(Collectors.toList());
+        ItemStack incoming = source.get();
+        List<ItemStack> sources = (bundle.isEmpty() ? Collections.singletonList(incoming) : bundle).stream()
+                .filter(access::isRecording).map(ItemStack::clone).collect(Collectors.toList());
         if (sources.isEmpty()) return;
         Playback playback = playbackFor(chest, location);
         if (playback == null) return;
-        Runnable move = access.inventoryClick(view, slot, button, input);
-        if (move == null) return;
-        event.setCancelled(true);
-        playback.recordings.transfer(chest, shift ? 0 : slot, shift ? size : slot + 1, sources,
-                player.getUniqueId(), swap || action == InventoryAction.SWAP_WITH_CURSOR, move);
-        player.updateInventory();
+        Map<Integer, RecordingApprovals.Stack> before = new HashMap<>();
+        if (shift) shiftSlots(chest, incoming, before);
+        else before.put(slot, new RecordingApprovals.Stack(access, chest.getItem(slot)));
+        ItemStack original = incoming.clone();
+        observeDeposit(event, player, chest, location, playback.recordings, before,
+                actual -> sources.stream().anyMatch(actual::isSimilar), () -> !original.equals(source.get()),
+                swap || action == InventoryAction.SWAP_WITH_CURSOR);
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    private void forgetRemovedRecordings(InventoryClickEvent event, Inventory chest, Location location) {
+        int slot = event.getRawSlot();
+        InventoryAction action = event.getAction();
+        if (action == InventoryAction.COLLECT_TO_CURSOR && access.isRecording(event.getCursor())) {
+            Playback playback = playback(location.getBlock().getRelative(BlockFace.DOWN));
+            if (playback != null) {
+                for (int i = 0; i < chest.getSize(); i++) {
+                    if (event.getCursor().isSimilar(chest.getItem(i))) playback.recordings.forget(i);
+                }
+            }
+        } else if (slot >= 0 && slot < chest.getSize()
+                && (action == InventoryAction.DROP_ONE_SLOT || action == InventoryAction.DROP_ALL_SLOT
+                || action == InventoryAction.PICKUP_ALL || action == InventoryAction.PICKUP_HALF
+                || action == InventoryAction.PICKUP_ONE || action == InventoryAction.PICKUP_SOME)
+                && access.isRecording(event.getCurrentItem())) {
+            Playback playback = playback(location.getBlock().getRelative(BlockFace.DOWN));
+            if (playback != null) playback.recordings.forget(slot);
+        }
+    }
+
+    private void shiftSlots(Inventory chest, ItemStack incoming, Map<Integer, RecordingApprovals.Stack> slots) {
+        int limit = Math.min(chest.getMaxStackSize(), incoming.getMaxStackSize());
+        int remaining = incoming.getAmount();
+        for (int i = 0; i < chest.getSize() && remaining > 0; i++) {
+            ItemStack item = chest.getItem(i);
+            int space = limit - amount(item);
+            if (!JukeboxAccess.empty(item) && incoming.isSimilar(item) && space > 0) {
+                slots.put(i, new RecordingApprovals.Stack(access, item));
+                remaining -= space;
+            }
+        }
+        for (int i = 0; i < chest.getSize() && remaining > 0; i++) {
+            if (JukeboxAccess.empty(chest.getItem(i))) {
+                slots.put(i, new RecordingApprovals.Stack(access, null));
+                remaining -= limit;
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void dragged(InventoryDragEvent event) {
         if (lazo == null || !(event.getWhoClicked() instanceof Player)) return;
         Player player = (Player) event.getWhoClicked();
@@ -217,45 +256,33 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
         Location location = chest.getLocation();
         Playback playback = playbackFor(chest, location);
         if (playback == null) return;
-        ItemStack remainder = JukeboxAccess.empty(event.getCursor()) ? null : event.getCursor().clone();
-        if (remainder != null && !source.isSimilar(remainder)) return;
         Map<Integer, RecordingApprovals.Stack> before = new HashMap<>();
-        Map<Integer, ItemStack> changes = new HashMap<>();
-        int moved = 0;
-        boolean depositsInChest = false;
         for (Map.Entry<Integer, ItemStack> change : event.getNewItems().entrySet()) {
             int slot = change.getKey();
-            if (slot < 0 || slot >= view.countSlots()) return;
-            ItemStack result = change.getValue();
-            ItemStack item = view.getItem(slot);
-            if (!source.isSimilar(result) || !JukeboxAccess.empty(item) && !source.isSimilar(item)) return;
-            int count = amount(result) - amount(item);
-            int limit = slot < chest.getSize() ? chest.getMaxStackSize() : view.getBottomInventory().getMaxStackSize();
-            if (count < 0 || result.getAmount() > Math.min(result.getMaxStackSize(), limit)) return;
-            if (count == 0) continue;
-            before.put(slot, new RecordingApprovals.Stack(access, item));
-            changes.put(slot, result.clone());
-            moved += count;
-            depositsInChest |= slot < chest.getSize();
-        }
-        if (!depositsInChest || moved != source.getAmount() - amount(remainder)) return;
-        event.setCancelled(true);
-        tasks.region(location.getWorld(), location.getBlockX() >> 4, location.getBlockZ() >> 4, () -> {
-            if (!event.isCancelled() || !stillOpen(player, view) || playbackFor(chest, location) != playback
-                    || !source.equals(player.getItemOnCursor())) return;
-            for (Map.Entry<Integer, RecordingApprovals.Stack> slot : before.entrySet()) {
-                if (!slot.getValue().matches(access, view.getItem(slot.getKey()))) return;
+            if (slot >= 0 && slot < chest.getSize() && source.isSimilar(change.getValue())) {
+                before.put(slot, new RecordingApprovals.Stack(access, chest.getItem(slot)));
             }
-            playback.recordings.update(chest);
-            changes.forEach((slot, result) -> {
-                view.setItem(slot, result);
-                if (slot < chest.getSize()) {
-                    playback.recordings.deposited(slot, before.get(slot), chest.getItem(slot), player.getUniqueId(), false);
-                }
-            });
-            player.setItemOnCursor(remainder);
-            player.updateInventory();
+        }
+        observeDeposit(event, player, chest, location, playback.recordings, before, source::isSimilar,
+                () -> amount(player.getItemOnCursor()) < source.getAmount(), false);
+    }
+
+    private void observeDeposit(InventoryInteractEvent event, Player player, Inventory chest, Location location,
+                                RecordingApprovals recordings, Map<Integer, RecordingApprovals.Stack> before,
+                                Predicate<ItemStack> incoming, BooleanSupplier transferred, boolean swap) {
+        if (before.isEmpty()) return;
+        recordings.update(chest);
+        InventoryView view = event.getView();
+        Runnable remove = access.observeSlotChanges(view, slot -> {
+            RecordingApprovals.Stack previous = before.get(slot);
+            if (previous == null || event.isCancelled() || !stillOpen(player, view) || !transferred.getAsBoolean()) return;
+            ItemStack committed = chest.getItem(slot);
+            if (!JukeboxAccess.empty(committed) && incoming.test(committed)) {
+                recordings.deposited(slot, previous, committed, player.getUniqueId(), swap);
+                before.remove(slot);
+            }
         });
+        if (remove != null) tasks.region(location.getWorld(), location.getBlockX() >> 4, location.getBlockZ() >> 4, remove);
     }
 
     private boolean stillOpen(Player player, InventoryView view) {
@@ -416,7 +443,7 @@ public final class JukeboxPlaylists extends JavaPlugin implements Listener {
                 reset(current, access.recordIdentity(box, current));
             }
             boolean recording = access.isRecording(previous);
-            advancePending = positions.restorePending(chunk, block, recording && previousStack == null ? null : previous, recording);
+            advancePending = positions.restorePending(chunk, block, recording && previousStack == null ? null : previous);
         }
 
         void tick(Chunk chunk, Block block) {
