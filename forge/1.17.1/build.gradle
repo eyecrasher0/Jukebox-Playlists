@@ -22,7 +22,7 @@ def playlistRenamerLauncher = javaToolchains.launcherFor { languageVersion = Jav
 tasks.named('renameJar') { javaLauncher.set(playlistRenamerLauncher) }
 dependencies { annotationProcessor 'org.spongepowered:mixin:0.8.5:processor' }
 
-version = '1.0.1'
+version = '1.1.0'
 group = 'dev.eyecrasher.jukeboxplaylists'
 base { archivesName = 'jukebox-playlists-forge-1.17.1' }
 tasks.withType(JavaCompile).configureEach {

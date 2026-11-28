@@ -1,5 +1,6 @@
 package dev.eyecrasher.jukeboxplaylists;
 
+import dev.eyecrasher.jukeboxplaylists.mixin.ContainerLockAccessor;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.inventory.IInventory;
 import net.minecraft.item.ItemStack;
@@ -13,7 +14,7 @@ import net.minecraft.state.properties.ChestType;
 public final class Playlists {
     private Playlists() {}
 
-    public static void advance(PlaylistJukebox jukebox, boolean repeat) {
+    public static boolean advance(PlaylistJukebox jukebox, boolean repeat) {
         TileEntity entity = (TileEntity) jukebox;
         World level = entity.getLevel();
         BlockPos position = entity.getBlockPos();
@@ -21,48 +22,68 @@ public final class Playlists {
         if (level == null || Platform.isClient(level) || entity.isRemoved()
                 || level.getBlockEntity(position) != entity
                 || !(level.getBlockState(position).getBlock() instanceof JukeboxBlock)) {
-            return;
+            return true;
         }
         BlockState above = level.getBlockState(position.above());
         if (!Platform.isPlaylistContainer(above)
                 || (above.getBlock() instanceof ChestBlock
                     && above.getValue(ChestBlock.TYPE) != ChestType.SINGLE)) {
-            return;
+            return true;
         }
         TileEntity containerEntity = level.getBlockEntity(position.above());
+        if (containerEntity instanceof ContainerLockAccessor
+                && !((ContainerLockAccessor) containerEntity).jukeboxPlaylists$getLock().unlocksWith(ItemStack.EMPTY)) {
+            return false;
+        }
         if (!(containerEntity instanceof IInventory)) {
-            return;
+            return true;
         }
         IInventory chest = (IInventory) containerEntity;
         int size = chest.getContainerSize();
-        ItemStack current = jukebox.playlist$current();
-        // Vanilla discs cannot stack. Avoid truncating stacks made by other mods.
-        if (current.getCount() > 1) {
-            return;
-        }
+        ItemStack current = jukebox.playlist$current().copy();
+        boolean canReturn = current.isEmpty()
+                || current.getCount() <= Math.min(current.getMaxStackSize(), chest.getMaxStackSize());
         int cursor = jukebox.playlist$position();
         if (cursor < -1 || cursor >= size) {
             cursor = -1;
         }
-        for (int offset = 1; offset <= size; offset++) {
+        for (int offset = 1; canReturn && offset <= size; offset++) {
             int slot = (cursor + offset) % size;
             ItemStack candidate = chest.getItem(slot);
-            if (candidate.getCount() == 1 && Platform.isDisc(candidate)) {
-                // Keep the complete ItemStack, including names, NBT and components.
-                chest.setItem(slot, current);
-                jukebox.playlist$position(slot);
-                jukebox.playlist$play(candidate);
-                chest.setChanged();
-                entity.setChanged();
-                return;
-            }
+            if (!Platform.isDisc(candidate) || candidate.getCount() > candidate.getMaxStackSize()) continue;
+            if (!tryPlay(jukebox, candidate, current)) continue;
+            chest.setItem(slot, current);
+            jukebox.playlist$position(slot);
+            chest.setChanged();
+            entity.setChanged();
+            return true;
         }
-        if (jukebox.playlist$position() != -1) {
+        if (canReturn && jukebox.playlist$position() != -1) {
             jukebox.playlist$position(-1);
             entity.setChanged();
         }
         if (repeat && Platform.isDisc(current)) {
-            jukebox.playlist$play(current);
+            tryPlay(jukebox, current, current);
         }
+        return true;
+    }
+
+    private static boolean tryPlay(PlaylistJukebox jukebox, ItemStack record, ItemStack previous) {
+        ItemStack installed = playStack(jukebox, record, false);
+        if (ItemStack.matches(record, installed)) return true;
+        if (!ItemStack.matches(previous, installed)) playStack(jukebox, previous, true);
+        return false;
+    }
+
+    private static ItemStack playStack(PlaylistJukebox jukebox, ItemStack record, boolean restore) {
+        jukebox.playlist$play(record.copy());
+        ItemStack installed = jukebox.playlist$current();
+        if (!installed.isEmpty() && installed.getCount() < record.getCount()
+                && (restore || LazoDiscsCompat.isCustom(record))) {
+            ItemStack partial = record.copy();
+            partial.setCount(installed.getCount());
+            if (ItemStack.matches(partial, installed)) installed.setCount(record.getCount());
+        }
+        return installed;
     }
 }
